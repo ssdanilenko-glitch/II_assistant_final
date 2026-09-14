@@ -1,0 +1,21 @@
+graph TD;
+    __start__([<b>START</b>]):::first
+    call_model[<b>call_model</b><br/>Вызов LLM]
+    execute_tool[<b>execute_tool</b><br/>Выполнение безопасных инструментов]
+    prepare_email[<b>prepare_email</b><br/>Подготовка draft письма]
+    confirm_and_send[<b>confirm_and_send</b><br/>Interrupt + отправка после подтверждения]
+    force_finish[<b>force_finish</b><br/>Завершение]
+    __end__([<b>END</b>]):::last
+
+    __start__ --> call_model
+    call_model -->|есть send_email| prepare_email
+    call_model -->|другие tool_calls| execute_tool
+    call_model -->|нет tool_calls или лимит итераций| force_finish
+    execute_tool --> call_model
+    prepare_email --> confirm_and_send
+    confirm_and_send --> force_finish
+    force_finish --> __end__
+
+    classDef default fill:#f2f0ff,line-height:1.2
+    classDef first fill-opacity:0
+    classDef last fill:#bfb6fc
