@@ -1,0 +1,10 @@
+[
+  {"role": "user", "content": "Сколько стоит тариф Pro?"},
+  {"role": "assistant", "content": "faq"},
+  {"role": "user", "content": "Не могу загрузить файл, появляется ошибка 413"},
+  {"role": "assistant", "content": "technical"},
+  {"role": "user", "content": "Ваш сервис работает ужасно, я недоволен"},
+  {"role": "assistant", "content": "complaint"},
+  {"role": "user", "content": "Позовите менеджера, иначе обращусь к юристу"},
+  {"role": "assistant", "content": "escalation"}
+]
