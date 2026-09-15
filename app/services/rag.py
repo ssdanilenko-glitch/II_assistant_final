@@ -120,6 +120,7 @@ class RAGService:
         qdrant_key = (
             settings.qdrant_api_key.get_secret_value()
             if settings.qdrant_api_key is not None
+               and settings.qdrant_api_key.get_secret_value()
             else None
         )
 

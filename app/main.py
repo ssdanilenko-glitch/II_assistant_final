@@ -29,7 +29,7 @@ from app.routers import agent, chat, documents, health, models, rag
 from app.routers import media as media_router
 from app.services.email_service import get_email_service
 
-logger = logging.getLogger("llm-service")
+logger = logging.getLogger("it_assistant")
 logging.basicConfig(level=logging.INFO)
 
 settings = get_settings()

@@ -25,7 +25,7 @@ DEFAULT_TOPICS: list[tuple[str, str]] = [
     ("КСМПП", "KSMPP"),
     ("Сеть", "Net"),
     ("Почта", "mail"),
-    ("Почта", "mail"),
+    ("Прочее", "other"),
 
 ]
 

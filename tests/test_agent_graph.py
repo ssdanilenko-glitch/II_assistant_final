@@ -1,123 +1,61 @@
-"""Тесты агентного графа на фейковой модели — без сети и без ключей."""
+"""Инструменты агента.
 
-import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+`multiply` — простой самодостаточный инструмент. `search_knowledge_base` — RAG
+как инструмент: обёртка над корпоративной базой знаний. Поиск инжектируется
+как async-callable, чтобы инструмент не зависел от инициализации RAG-сервиса
+напрямую и легко подменялся в тестах.
+"""
 
-from app.agents.graph import MAX_ITERATIONS, build_custom_graph
-from app.agents.tools import build_search_knowledge_base, multiply
+from collections.abc import Awaitable, Callable
+
+from langchain_core.tools import BaseTool, StructuredTool, tool
 
 
-class FakeChat:
-    """Заглушка ChatModel: отдаёт заранее заготовленную последовательность ответов.
+def build_search_knowledge_base(
+    search_fn: Callable[[str], Awaitable[dict]],
+) -> BaseTool:
+    """Собирает инструмент поиска по базе знаний поверх переданного `search_fn`.
 
-    Последний ответ повторяется, если вызовов больше, чем заготовлено.
+    `search_fn(query)` возвращает контракт RAG-сервиса
+    `{answer, sources[id, file_name, ...], confident, ...}`.
     """
 
-    def __init__(self, responses: list[AIMessage]) -> None:
-        self._responses = responses
-        self._i = 0
+    async def _search_knowledge_base(query: str) -> str:
+        """Ищет ответ в корпоративной базе знаний по текстовому запросу.
 
-    def bind_tools(self, tools):  # noqa: ANN001
-        return self
+        Вызывать, когда нужен факт из документов компании. Не вызывать для
+        арифметики или общих знаний, которые модель знает сама.
+        """
+        result = await search_fn(query)
+        answer = result.get("answer", "")
+        confident = result.get("confident", True)
+        sources = result.get("sources", [])
 
-    async def ainvoke(self, messages):  # noqa: ANN001
-        response = self._responses[min(self._i, len(self._responses) - 1)]
-        self._i += 1
-        return response
-
-
-def _tool_call(name: str, args: dict, call_id: str) -> AIMessage:
-    return AIMessage(
-        content="",
-        tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
-    )
-
-
-async def _run(graph, text: str) -> dict:
-    return await graph.ainvoke(
-        {"messages": [HumanMessage(text)], "iteration_count": 0, "tool_results": []}
-    )
-
-
-@pytest.mark.asyncio
-async def test_custom_graph_runs_tool_and_finishes():
-    model = FakeChat(
-        [
-            _tool_call("multiply", {"a": 17, "b": 23}, "c1"),
-            AIMessage(content="Ответ: 391"),
-        ]
-    )
-    graph = build_custom_graph(model, [multiply])
-
-    result = await _run(graph, "Сколько будет 17 * 23?")
-
-    assert result["messages"][-1].content == "Ответ: 391"
-    assert result["tool_results"] == [
-        {"name": "multiply", "args": {"a": 17, "b": 23}, "result": "391"}
-    ]
-
-
-@pytest.mark.asyncio
-async def test_force_finish_stops_runaway_loop():
-    # Модель всегда просит инструмент — без лимита это бесконечный цикл.
-    # Каждый ответ — новое сообщение с уникальным id, иначе add_messages
-    # склеит их по id и цикл не наберёт итераций.
-    class LoopingChat:
-        def __init__(self) -> None:
-            self._n = 0
-
-        def bind_tools(self, tools):  # noqa: ANN001
-            return self
-
-        async def ainvoke(self, messages):  # noqa: ANN001
-            self._n += 1
-            return AIMessage(
-                content="",
-                id=f"ai-{self._n}",
-                tool_calls=[
-                    {
-                        "name": "multiply",
-                        "args": {"a": 2, "b": 2},
-                        "id": f"c{self._n}",
-                        "type": "tool_call",
-                    }
-                ],
+        # Если RAG не уверен или вернул пустоту — не отдаём список источников,
+        # иначе LLM начнёт их перечислять и пересказывать.
+        if not answer or not confident:
+            return (
+                "В базе знаний нет ответа на этот вопрос. "
+                "Не перечисляй источники и не пересказывай их содержимое. "
+                "Сообщи пользователю, что информация не найдена."
             )
 
-    graph = build_custom_graph(LoopingChat(), [multiply])
+        cited = ", ".join(
+            f"[{s.get('id')}] {s.get('file_name', '')}".strip() for s in sources
+        )
+        return f"{answer}\nИсточники: {cited}"
 
-    result = await _run(graph, "зациклись")
-
-    assert result["iteration_count"] == MAX_ITERATIONS
-
-
-@pytest.mark.asyncio
-async def test_unknown_tool_returns_error_not_crash():
-    model = FakeChat(
-        [
-            _tool_call("delete_everything", {}, "c1"),
-            AIMessage(content="Не могу это сделать."),
-        ]
+    return StructuredTool.from_function(
+        coroutine=_search_knowledge_base,
+        name="search_knowledge_base",
+        description=(
+            "Ищет ответ в корпоративной базе знаний по текстовому запросу. "
+            "Вызывать, когда нужен факт из документов компании."
+        ),
     )
-    graph = build_custom_graph(model, [multiply])
-
-    result = await _run(graph, "удали всё")
-
-    assert result["tool_results"][0]["result"].startswith("error: unknown tool")
-    assert result["messages"][-1].content == "Не могу это сделать."
 
 
-@pytest.mark.asyncio
-async def test_search_knowledge_base_tool_formats_sources():
-    async def fake_search(query: str) -> dict:
-        return {
-            "answer": "Срок возврата — 14 дней [1].",
-            "sources": [{"id": 1, "file_name": "returns.md"}],
-            "confident": True,
-        }
-
-    search_tool = build_search_knowledge_base(fake_search)
-    out = await search_tool.ainvoke({"query": "срок возврата"})
-
-    assert "Срок возврата — 14 дней" in out
-    assert "[1] returns.md" in out
+@tool
+def multiply(a: int, b: int) -> int:
+    """Умножить два числа. Демонстрационный инструмент для тестов графа."""
+    return a * b

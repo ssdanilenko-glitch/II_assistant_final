@@ -25,7 +25,7 @@ from app.chat.repository import ChatRepository, SystemPromptRepository
 from app.moderation.domain import ModerationResult
 from app.moderation.service import ModerationService
 
-logger = logging.getLogger("llm-service.chat")
+logger = logging.getLogger("it_assistant.chat")
 
 
 class ChatService:

@@ -8,7 +8,7 @@
 
 from collections.abc import Awaitable, Callable
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
 
 
 def build_search_knowledge_base(
@@ -20,26 +20,37 @@ def build_search_knowledge_base(
     `{answer, sources[id, file_name, ...], confident, ...}`.
     """
 
-    @tool
-    async def search_knowledge_base(query: str) -> str:
-        """Ищет ответ в корпоративной базе знаний по текстовому запросу.
-
-        Вызывать, когда нужен факт из документов компании. Не вызывать для
-        арифметики или общих знаний, которые модель знает сама.
-        """
+    async def _search_knowledge_base(query: str) -> str:
         result = await search_fn(query)
         answer = result.get("answer", "")
+        confident = result.get("confident", True)
         sources = result.get("sources", [])
-        if not sources:
-            return answer
-        cited = "; ".join(
+
+        # Если RAG не уверен или вернул пустоту — не отдаём список источников,
+        # иначе LLM начнёт их перечислять и пересказывать.
+        if not answer or not confident:
+            return (
+                "В базе знаний нет ответа на этот вопрос. "
+                "Не перечисляй источники и не пересказывай их содержимое. "
+                "Сообщи пользователю, что информация не найдена."
+            )
+
+        cited = ", ".join(
             f"[{s.get('id')}] {s.get('file_name', '')}".strip() for s in sources
         )
         return f"{answer}\nИсточники: {cited}"
 
-    return search_knowledge_base
+    return StructuredTool.from_function(
+        coroutine=_search_knowledge_base,
+        name="search_knowledge_base",
+        description=(
+            "Ищет ответ в корпоративной базе знаний по текстовому запросу. "
+            "Вызывать, когда нужен факт из документов компании."
+        ),
+    )
+
 
 @tool
 def multiply(a: int, b: int) -> int:
-    """Умножить два числа. Демонстрационный инструмент для тестов графа."""
+    """Умножить два числа. Демонстрационный инструмент."""
     return a * b

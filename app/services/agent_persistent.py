@@ -28,12 +28,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 
-logger = logging.getLogger("llm-service")
+logger = logging.getLogger("it_assistant")
 MAX_ITERATIONS = 6
 DANGEROUS_TOOL = "send_email"
 
-# Реальный side-effect отправки: async-callable, инжектируется в фабрику, чтобы
-# в тестах подменяться моком и вызываться ТОЛЬКО после одобрения человеком.
 SendEmailFn = Callable[[dict], Awaitable[None]]
 
 
@@ -72,7 +70,7 @@ def build_agent(
 ):
     """Компилирует персистентный ReAct-граф с HIL-гейтом на `send_email`.
 
-    `tools` — безопасные инструменты (multiply, search_knowledge_base). Опасный
+    `tools` — безопасные инструменты (search_knowledge_base). Опасный
     `send_email` добавляется здесь и исполняется не в `execute_tool`, а через
     отдельную ветку с `interrupt`.
 

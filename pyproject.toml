@@ -47,10 +47,10 @@ dependencies = [
 
 [project.optional-dependencies]
 tracing = [
-    "openinference-instrumentation-llama-index>=3,<4",
     "openinference-instrumentation-langchain>=0.1",
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp>=1.20",
+    "openinference-instrumentation-llama-index>=4.4.2",
 ]
 eval = [
     "ragas>=0.4,<0.5",

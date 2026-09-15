@@ -93,9 +93,9 @@ class IngestionService:
         qdrant_key = (
             settings.qdrant_api_key.get_secret_value()
             if settings.qdrant_api_key is not None
+               and settings.qdrant_api_key.get_secret_value()
             else None
         )
-
         self._data_dir = Path(settings.rag_data_dir)
         self._docstore_path = self._data_dir.parent / f"{settings.rag_collection}_docstore.json"
 

@@ -4,14 +4,15 @@ FROM python:3.12-slim AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=0
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_TORCH_BACKEND=cpu
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /uvx /bin/
 
 WORKDIR /app
 RUN uv venv
 
-COPY pyproject.backup.toml ./
+COPY pyproject.toml uv.lock ./
 COPY app/ ./app/
 COPY bot/ ./bot/
 COPY migrations/ ./migrations/
@@ -20,7 +21,7 @@ COPY alembic.ini ./
 # Включаем extras eval для запуска run_eval.py внутри контейнера.
 # Если оценка не нужна в образе — уберите --extra eval (образ станет легче на ~300 МБ).
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    uv sync --no-dev --extra eval
+    uv sync --no-dev --extra eval  --extra tracing
 
 # ========== RUNTIME ==========
 FROM python:3.12-slim
