@@ -58,7 +58,6 @@ eval = [
     "anthropic>=0.40",
     "llama-index-llms-anthropic>=0.3",
     "pandas>=2",
-    "arize-phoenix>=5",
 ]
 
 [dependency-groups]

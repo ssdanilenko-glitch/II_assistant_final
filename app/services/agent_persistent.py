@@ -130,7 +130,6 @@ def build_agent(
         return {"messages": messages, "tool_results": results}
 
     async def prepare_email(state: PersistentAgentState) -> dict:
-        """Idempotent: собирает payload письма из tool_call. Без side-effect."""
         call = _find_call(state["messages"][-1], DANGEROUS_TOOL)
         args = call["args"]
         draft = {
@@ -140,16 +139,18 @@ def build_agent(
             "tool_call_id": call["id"],
         }
         logger.info(f"[prepare_email] Draft created: to={draft['to']}, subject={draft['subject']}")
+        # Фразу-отказ добавляем ТОЛЬКО для заявок в HelpDesk.
+        # Если это свободная отправка («Отправь ответ на адрес X») —
+        # не подменяем body страховкой.
         last = state["messages"][-1]
         current_text = str(getattr(last, "content", "") or "").strip()
         update: dict = {"draft": draft}
-        if len(current_text) < 30:
+        is_helpdesk = draft["subject"].startswith("Заявка в HelpDesk")
+        if len(current_text) < 30 and is_helpdesk:
             update["messages"] = [
                 AIMessage(
-                    content=(
-                        "В базе знаний нет ответа на этот вопрос.\n\n"
-                        "Я подготовил заявку в HelpDesk — подтвердите отправку."
-                    )
+                    content="В базе знаний нет ответа на этот вопрос.\n\n"
+                            "Я подготовил заявку в HelpDesk — подтвердите отправку."
                 )
             ]
         return update

@@ -44,6 +44,7 @@ services:
       retries: 3
       start_period: 15s
     volumes:
+      - ./app:/app/app
       - ./data/chats:/var/chats
       - ./data/rag-block-03:/app/data/rag-block-03
       - ./scripts:/app/scripts

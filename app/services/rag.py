@@ -15,7 +15,6 @@
 
 import logging
 import re
-import httpx
 
 from llama_index.core import (
     PromptTemplate,
@@ -31,31 +30,31 @@ from llama_index.core.vector_stores import (
     MetadataFilter,
     MetadataFilters,
 )
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient, QdrantClient
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 
 from app.core.config import Settings as AppSettings
-from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-REFUSAL_TEXT = "В базе знаний я не нашёл ответа на этот вопрос."
+REFUSAL_TEXT = "В базе знаний нет ответа на этот вопрос."
 
 CITATION_QA_PROMPT = PromptTemplate(
     "Ниже — пронумерованные источники из базы знаний.\n"
     "---------------------\n{context_str}\n---------------------\n"
-    "Ответь на вопрос, опираясь ТОЛЬКО на источники. Каждый факт сопровождай "
-    "номером источника в квадратных скобках, например [1] или [2]. Если ответа "
-    "в источниках нет — честно напиши, что не нашёл его в базе знаний, и ничего "
-    "не выдумывай. Отвечай по-русски, коротко и по делу.\n"
+    "ВАЖНО: перед ответом проверь, что источники СООТВЕТСТВУЮТ вопросу. "
+    "Если вопрос про одно (например, «личный кабинет»), а источники про другое "
+    "(например, «отправка файлов на почту») — это НЕ ответ. "
+    "Если в источниках нет прямого ответа — начни ответ ровно этой фразой: "
+    "«В базе знаний нет ответа на этот вопрос», и НЕ добавляй больше ничего.\n"
+    "Если источники соответствуют вопросу — ответь, опираясь ТОЛЬКО на них. "
+    "Каждый факт сопровождай номером источника в квадратных скобках, "
+    "например [1] или [2]. Ничего не выдумывай. Отвечай по-русски, коротко.\n"
     "Вопрос: {query_str}\n"
     "Ответ: "
 )
-
 
 def build_sources(source_nodes: list[NodeWithScore]) -> list[dict]:
     """Нумерованные цитаты [1..N]: id, file_name, page, score, snippet."""
@@ -120,7 +119,6 @@ class RAGService:
 
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
-        api_key = settings.llm.openai_api_key.get_secret_value()
         qdrant_key = (
             settings.qdrant_api_key.get_secret_value()
             if settings.qdrant_api_key is not None
@@ -167,7 +165,7 @@ class RAGService:
             "collection_name": self._settings.rag_collection,
             "client": self._client,
             "aclient": self._aclient,
-            "text_key": "text",  # <-- добавляем
+            "text_key": "text",  # LlamaIndex хранит текст чанка в payload.text
         }
         if self._settings.rag_use_hybrid:
             kwargs["enable_hybrid"] = True

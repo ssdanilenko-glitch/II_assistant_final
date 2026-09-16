@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     rag_top_k: int = 3
     rag_chunk_size: int = 512
     rag_chunk_overlap: int = 64
-    rag_score_threshold: float = 0.5
+    rag_score_threshold: float = 0.55
     rag_retrieve_top_k: int = 10
     rag_rerank_top_n: int = 5
     rag_use_reranker: bool = False
