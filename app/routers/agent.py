@@ -109,10 +109,16 @@ def _format_event(stream_type: str, payload: Any) -> dict | None:
         return {"type": "update", "nodes": list(payload.keys())}
     if stream_type == "messages":
         chunk, _meta = payload
+        # LangGraph в режиме messages отдаёт ВСЕ сообщения, включая ToolMessage
+        # с ответом RAG. Если их стримить как token — пользователь увидит
+        # ответ дважды: сначала из ToolMessage, потом из AIMessage
+        # (deliver_tool_answer). Стримим только AIMessage.
+        from langchain_core.messages import AIMessage
+        if not isinstance(chunk, AIMessage):
+            return None
         text = getattr(chunk, "content", "")
         return {"type": "token", "text": text} if text else None
     return None
-
 
 @router.post("/stream")
 async def agent_stream(

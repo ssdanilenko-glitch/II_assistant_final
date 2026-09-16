@@ -13,8 +13,8 @@
 таблицы `checkpoint*` исключены из autogenerate через `include_name`).
 """
 
-import logging
 import operator
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict
@@ -27,11 +27,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
+from langchain_core.messages import AIMessage
 
-logger = logging.getLogger("it_assistant")
+logger = logging.getLogger("llm-service")
 MAX_ITERATIONS = 6
 DANGEROUS_TOOL = "send_email"
 
+# Реальный side-effect отправки: async-callable, инжектируется в фабрику, чтобы
+# в тестах подменяться моком и вызываться ТОЛЬКО после одобрения человеком.
 SendEmailFn = Callable[[dict], Awaitable[None]]
 
 
@@ -70,7 +73,7 @@ def build_agent(
 ):
     """Компилирует персистентный ReAct-граф с HIL-гейтом на `send_email`.
 
-    `tools` — безопасные инструменты (search_knowledge_base). Опасный
+    `tools` — безопасные инструменты (multiply, search_knowledge_base). Опасный
     `send_email` добавляется здесь и исполняется не в `execute_tool`, а через
     отдельную ветку с `interrupt`.
 
@@ -83,6 +86,16 @@ def build_agent(
     async def call_model(state: PersistentAgentState) -> dict:
         messages = state["messages"]
         logger.info(f"[call_model] messages length: {len(messages)}")
+
+        # Защита: если messages пусто (например, после ошибочного resume
+        # на несуществующий thread_id) — не зовём Ollama, она упадёт с
+        # "No user query found". Возвращаем короткое сообщение.
+        if not messages:
+            logger.warning("[call_model] пустой messages — пропускаю вызов LLM")
+            return {
+                "messages": [AIMessage(content="Сессия потеряна. Начните заново с /start.")],
+                "iteration_count": state.get("iteration_count", 0) + 1,
+            }
 
         # Добавляем SystemMessage только для текущего вызова, но не сохраняем в истории
         if system_prompt:
@@ -127,7 +140,19 @@ def build_agent(
             "tool_call_id": call["id"],
         }
         logger.info(f"[prepare_email] Draft created: to={draft['to']}, subject={draft['subject']}")
-        return {"draft": draft}
+        last = state["messages"][-1]
+        current_text = str(getattr(last, "content", "") or "").strip()
+        update: dict = {"draft": draft}
+        if len(current_text) < 30:
+            update["messages"] = [
+                AIMessage(
+                    content=(
+                        "В базе знаний нет ответа на этот вопрос.\n\n"
+                        "Я подготовил заявку в HelpDesk — подтвердите отправку."
+                    )
+                )
+            ]
+        return update
 
     async def confirm_and_send(
             state: PersistentAgentState, config: RunnableConfig
@@ -248,7 +273,6 @@ async def agent_lifespan(
         yield build_agent(InMemorySaver(), model, tools, send_email_fn, system_prompt=system_prompt)
     elif backend == "sqlite":
         from pathlib import Path
-
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)

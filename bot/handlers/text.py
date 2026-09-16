@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
@@ -39,9 +40,12 @@ async def on_confirm_decision(
     elif text in ("нет", "отмена", "cancel", "no", "-"):
         decision = False
     else:
-        await message.answer("Пожалуйста, ответьте 'да' или 'нет'.")
+        # Пользователь задал новый вопрос, а не ответил «да/нет».
+        # Выходим из режима подтверждения и обрабатываем как обычный текст.
+        log.info("on_confirm_decision: пользователь задал новый вопрос — выход из режима")
+        await state.clear()
+        await on_text(message, backend, state)
         return
-
     try:
         events = backend.resume(
             thread_id=thread_id,
@@ -75,7 +79,10 @@ async def on_text(message: Message, backend: BackendClient, state: FSMContext) -
     stop = asyncio.Event()
     typing_task = asyncio.create_task(typing_until(message.bot, message.chat.id, stop))
     try:
-        thread_id = str(message.chat.id)  # единый thread_id на пользователя
+        # Свежий thread_id на каждый вопрос — пустой чекпоинт LangGraph,
+        # никаких зависших состояний из прошлых диалогов.
+        thread_id = f"{message.chat.id}_{int(time.time() * 1000)}"
+
         sender_info = get_sender_info(message)
         content_with_sender = f"{sender_info}\n\n{message.text}"
         events = backend.send_message(

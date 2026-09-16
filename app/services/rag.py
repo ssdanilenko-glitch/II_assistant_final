@@ -15,6 +15,7 @@
 
 import logging
 import re
+import httpx
 
 from llama_index.core import (
     PromptTemplate,
@@ -30,12 +31,15 @@ from llama_index.core.vector_stores import (
     MetadataFilter,
     MetadataFilters,
 )
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.ollama import Ollama
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient, QdrantClient
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.ollama import Ollama
 
 from app.core.config import Settings as AppSettings
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +124,6 @@ class RAGService:
         qdrant_key = (
             settings.qdrant_api_key.get_secret_value()
             if settings.qdrant_api_key is not None
-               and settings.qdrant_api_key.get_secret_value()
             else None
         )
 
@@ -170,7 +173,7 @@ class RAGService:
             kwargs["enable_hybrid"] = True
             kwargs["fastembed_sparse_model"] = self._settings.rag_sparse_model
         return QdrantVectorStore(**kwargs)
-
+    
     def _collection_ready(self) -> bool:
         """Коллекция существует и непуста — индексировать заново не нужно."""
         if not self._client.collection_exists(self._settings.rag_collection):

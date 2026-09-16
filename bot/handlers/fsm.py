@@ -14,16 +14,27 @@ router = Router(name="confirm")
 # Объединяем оба типа callback-запросов (send и cancel) в одном обработчике
 @router.callback_query(F.data.startswith(("confirm_send_", "confirm_cancel_")))
 async def on_confirm_action(cb: CallbackQuery, backend: BackendClient, state: FSMContext):
-    """
-    Обрабатывает нажатие кнопок «Отправить» и «Отмена».
-    Извлекает thread_id из конца callback_data.
-    """
-    # Извлекаем thread_id как последнюю часть после последнего '_'
-    thread_id = cb.data.split("_")[-1]
+    """Обрабатывает нажатие кнопок «Отправить» и «Отмена»."""
+    # Сразу отвечаем Telegram — иначе callback протухает за 15 секунд,
+    # пока идёт медленный resume с генерацией письма.
+    try:
+        await cb.answer()
+    except Exception:
+        pass
 
-    # Определяем решение: True для отправки, False для отмены
-    decision = "send" in cb.data  # если в строке есть 'send' → True
-
+    # Извлекаем decision и thread_id по префиксам. Нельзя split("_")[-1]:
+    # unique thread_id = "443426947_1734123456789" содержит подчёркивание,
+    # и split вернёт только timestamp — LangGraph не найдёт чекпоинт.
+    if cb.data.startswith("confirm_send_"):
+        decision = True
+        thread_id = cb.data[len("confirm_send_"):]
+    elif cb.data.startswith("confirm_cancel_"):
+        decision = False
+        thread_id = cb.data[len("confirm_cancel_"):]
+    else:
+        await cb.answer("Неизвестная команда")
+        return
+    
     try:
         events = backend.resume(
             thread_id=thread_id,
@@ -36,14 +47,13 @@ async def on_confirm_action(cb: CallbackQuery, backend: BackendClient, state: FS
         else:
             log.info("on_confirm_action: очистка состояния после успешного resume")
             await state.clear()
-            await cb.answer("✅ Заявка отправлена" if decision else "❌ Отменено")
+            await cb.message.answer("✅ Заявка отправлена" if decision else "❌ Отменено")
     except Exception:
         log.exception("Ошибка при resume")
         await cb.message.answer("Не удалось обработать решение. Попробуйте позже.")
         await state.clear()
-        await cb.answer()
 
-    # Удаляем клавиатуру у сообщения, чтобы избежать повторного нажатия
+    # Убираем клавиатуру у сообщения
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:

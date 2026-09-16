@@ -19,24 +19,21 @@ router = Router(name="commands")
 async def cmd_start(
         message: Message, backend: BackendClient, state: FSMContext
 ) -> None:
-    thread_id = str(message.chat.id)
+    await state.clear()
+    # Просто создаём/получаем чат по стабильному chat.id
     try:
-        await backend.clear_agent_thread(thread_id)
+        await backend.get_or_create_chat(
+            owner_external_id=str(message.chat.id),
+            interface="telegram",
+        )
     except Exception as e:
-        logger.warning(f"Could not clear agent thread {thread_id}: {e}")
+        logger.warning(f"get_or_create_chat failed: {e}")
 
-    await backend.get_or_create_chat(
-        owner_external_id=thread_id,
-        interface="telegram",
-    )
-
-    # Отправляем приветствие С КЛАВИАТУРОЙ
     await message.answer(
         "Привет! Я подключён к chat-сервису. Выберите тему или напишите вопрос.\n"
         "Команды: /help, /ask, /clear, /cancel",
-        reply_markup=topics_kb()  # <--- ДОБАВИТЬ ЭТО
+        reply_markup=topics_kb()
     )
-
 
 @router.callback_query(F.data.startswith("topic:"))
 async def on_topic_selected(cb: CallbackQuery, state: FSMContext) -> None:
