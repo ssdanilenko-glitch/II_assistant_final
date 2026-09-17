@@ -19,8 +19,8 @@ router = Router(name="commands")
 async def cmd_start(
         message: Message, backend: BackendClient, state: FSMContext
 ) -> None:
+    """Приветствие. Кнопки — по команде /ask."""
     await state.clear()
-    # Просто создаём/получаем чат по стабильному chat.id
     try:
         await backend.get_or_create_chat(
             owner_external_id=str(message.chat.id),
@@ -30,9 +30,23 @@ async def cmd_start(
         logger.warning(f"get_or_create_chat failed: {e}")
 
     await message.answer(
-        "Привет! Я подключён к chat-сервису. Выберите тему или напишите вопрос.\n"
-        "Команды: /help, /ask, /clear, /cancel",
-        reply_markup=topics_kb()
+        "Привет! Я ИТ-ассистент технической поддержки.\n\n"
+        "Чтобы задать вопрос — используйте /ask или просто напишите его текстом.\n\n"
+        "Команды:\n"
+        "/ask — задать вопрос с выбором темы\n"
+        "/help — справка по командам\n"
+        "/clear — очистить историю диалога\n"
+        "/cancel — отменить текущий сценарий"
+    )
+
+
+@router.message(Command("ask"))
+async def cmd_ask(message: Message, state: FSMContext) -> None:
+    """Показать клавиатуру с темами."""
+    await state.set_state(AskFlow.waiting_for_topic)
+    await message.answer(
+        "Выберите тему из списка или напишите вопрос напрямую:",
+        reply_markup=topics_kb(),
     )
 
 @router.callback_query(F.data.startswith("topic:"))
@@ -51,7 +65,7 @@ async def on_topic_selected(cb: CallbackQuery, state: FSMContext) -> None:
 
     await cb.answer()
     await cb.message.edit_text(
-        f"Вы выбрали тему: **{slug}**\n\nНапишите ваш вопрос:",
+        f"Вы выбрали тему: **{slug}**\nНапишите ваш вопрос:",
         parse_mode="Markdown"
     )
 
@@ -60,13 +74,12 @@ async def on_topic_selected(cb: CallbackQuery, state: FSMContext) -> None:
 async def cmd_help(message: Message) -> None:
     await message.answer(
         "Доступные команды:\n"
-        "/start — начать заново\n"
+        "/start — приветствие и справка\n"
         "/ask — задать вопрос с выбором темы\n"
         "/clear — очистить историю диалога\n"
         "/cancel — отменить текущий сценарий\n"
         "\nДля админов: /stats, /broadcast <текст>"
     )
-
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
