@@ -7,11 +7,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
-from app.agents.tools import multiply
 from app.services.agent_persistent import build_agent
+
+
+@tool
+def dummy_tool(a: int, b: int) -> int:
+    """Демонстрационный инструмент для тестов графа."""
+    return a * b
 
 
 class FakeChat:
@@ -65,15 +71,15 @@ async def test_graph_reaches_interrupt_before_send():
     send_fn = AsyncMock()
     async with AsyncSqliteSaver.from_conn_string(":memory:") as saver:
         await saver.setup()
-        graph = build_agent(saver, _model(), [multiply], send_fn)
+        graph = build_agent(saver, _model(), [dummy_tool], send_fn)
         config = {"configurable": {"thread_id": "t-interrupt"}}
 
         result = await graph.ainvoke(_initial(), config)
 
-        assert "__interrupt__" in result  # граф встал на interrupt
+        assert "__interrupt__" in result
         snapshot = await graph.aget_state(config)
-        assert "confirm_and_send" in snapshot.next  # ждём узел подтверждения
-        send_fn.assert_not_called()  # side-effect ещё не выполнялся
+        assert "confirm_and_send" in snapshot.next
+        send_fn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -81,7 +87,7 @@ async def test_resume_true_sends_email():
     send_fn = AsyncMock()
     async with AsyncSqliteSaver.from_conn_string(":memory:") as saver:
         await saver.setup()
-        graph = build_agent(saver, _model(), [multiply], send_fn)
+        graph = build_agent(saver, _model(), [dummy_tool], send_fn)
         config = {"configurable": {"thread_id": "t-approve"}}
 
         await graph.ainvoke(_initial(), config)
@@ -97,23 +103,22 @@ async def test_resume_false_does_not_send():
     send_fn = AsyncMock()
     async with AsyncSqliteSaver.from_conn_string(":memory:") as saver:
         await saver.setup()
-        graph = build_agent(saver, _model(), [multiply], send_fn)
+        graph = build_agent(saver, _model(), [dummy_tool], send_fn)
         config = {"configurable": {"thread_id": "t-reject"}}
 
         await graph.ainvoke(_initial(), config)
         final = await graph.ainvoke(Command(resume=False), config)
 
         assert final["sent"] is False
-        send_fn.assert_not_called()  # отказ — реального вызова API нет
+        send_fn.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_role_full_skips_interrupt():
-    # Роль full: узел подтверждения не поднимает interrupt, письмо уходит сразу.
     send_fn = AsyncMock()
     async with AsyncSqliteSaver.from_conn_string(":memory:") as saver:
         await saver.setup()
-        graph = build_agent(saver, _model(), [multiply], send_fn)
+        graph = build_agent(saver, _model(), [dummy_tool], send_fn)
         config = {"configurable": {"thread_id": "t-full", "user_role": "full"}}
 
         result = await graph.ainvoke(_initial(), config)

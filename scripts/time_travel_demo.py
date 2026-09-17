@@ -19,8 +19,15 @@ from langgraph.types import Command
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.agents.tools import multiply  # noqa: E402
 from app.services.agent_persistent import build_agent  # noqa: E402
+
+from langchain_core.tools import tool  # noqa: E402
+
+
+@tool
+def dummy_tool(a: int, b: int) -> int:
+    """Демо-инструмент для time-travel."""
+    return a * b
 
 
 class FakeChat:
@@ -69,7 +76,7 @@ async def main() -> None:
 
     async with AsyncSqliteSaver.from_conn_string(":memory:") as saver:
         await saver.setup()
-        graph = build_agent(saver, FakeChat(), [multiply], send_fn)
+        graph = build_agent(saver, FakeChat(), [dummy_tool], send_fn)
         role = "write-with-approve"
         config = {"configurable": {"thread_id": "demo", "user_role": role}}
 

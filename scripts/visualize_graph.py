@@ -14,12 +14,18 @@ from langchain_openai import ChatOpenAI
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.agents.graph import build_custom_graph  # noqa: E402
-from app.agents.tools import multiply  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
+
+
+@tool
+def dummy_tool(a: int, b: int) -> int:
+    """Демо-инструмент для визуализации графа."""
+    return a * b
 
 
 def main() -> None:
     model = ChatOpenAI(model="gpt-5.4-mini", temperature=0, api_key="sk-placeholder")
-    graph = build_custom_graph(model, [multiply])
+    graph = build_custom_graph(model, [dummy_tool])
     mermaid = graph.get_graph().draw_mermaid()
 
     out = Path("docs/agent-graph-custom.mmd")

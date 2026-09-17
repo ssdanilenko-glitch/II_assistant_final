@@ -46,7 +46,7 @@ app/
 │
 ├── agents/                              # Агентный слой (LangGraph)
 │   ├── __init__.py
-│   └── tools.py                         # build_search_knowledge_base, multiply
+│   └── tools.py                         # build_search_knowledge_base
 │
 ├── chat/                                # Логика чата (без агента)
 │   ├── __init__.py

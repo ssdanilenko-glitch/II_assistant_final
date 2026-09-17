@@ -1,6 +1,6 @@
 """Инструменты агента.
 
-`multiply` — простой самодостаточный инструмент. `search_knowledge_base` — RAG
+`search_knowledge_base` — RAG
 как инструмент: обёртка над корпоративной базой знаний. Поиск инжектируется
 как async-callable, чтобы инструмент не зависел от инициализации RAG-сервиса
 напрямую и легко подменялся в тестах.
@@ -8,8 +8,15 @@
 
 from collections.abc import Awaitable, Callable
 
-from langchain_core.tools import BaseTool, StructuredTool, tool
+from langchain_core.tools import BaseTool, StructuredTool
 
+from langchain_core.tools import tool
+
+
+@tool
+def dummy_tool(a: int, b: int) -> int:
+    """Демо-инструмент для скрипта."""
+    return a * b
 
 def build_search_knowledge_base(
     search_fn: Callable[[str], Awaitable[dict]],
@@ -53,9 +60,3 @@ def build_search_knowledge_base(
             "Вызывать, когда нужен факт из документов компании."
         ),
     )
-
-
-@tool
-def multiply(a: int, b: int) -> int:
-    """Умножить два числа. Демонстрационный инструмент для тестов графа."""
-    return a * b
