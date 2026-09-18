@@ -7,9 +7,11 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.keyboards.inline import topics_kb  # <--- ДОБАВИТЬ ИМПОРТ
+from bot.keyboards.inline import topics_kb
 from bot.services.backend_client import BackendClient
-from bot.states import AskFlow
+
+from bot.services.streaming import stream_to_chat
+from bot.states import AskFlow, ConfirmFlow
 
 logger = logging.getLogger(__name__)
 router = Router(name="commands")
@@ -78,22 +80,44 @@ async def cmd_help(message: Message) -> None:
         "/ask — задать вопрос с выбором темы\n"
         "/clear — очистить историю диалога\n"
         "/cancel — отменить текущий сценарий\n"
-        "\nДля админов: /stats, /broadcast <текст>"
+        "\nДля админов: /stats, /broadcast «текст»",
+        parse_mode=None,
     )
-
 @router.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
+async def cmd_cancel(
+        message: Message, state: FSMContext, backend: BackendClient
+) -> None:
     current = await state.get_state()
     if current is None:
         await message.answer("Нечего отменять.")
         return
 
+    # HIL-подтверждение: отправляем resume(False), чтобы корректно закрыть interrupt
+    if current == ConfirmFlow.waiting_for_decision:
+        data = await state.get_data()
+        thread_id = data.get("thread_id")
+        logger.info("cmd_cancel: отмена HIL, thread_id=%s", thread_id)
+        if thread_id:
+            try:
+                events = backend.resume(
+                    thread_id=thread_id,
+                    decision=False,
+                    owner_external_id=str(message.chat.id),
+                )
+                await stream_to_chat(message, events)
+            except Exception:
+                logger.exception("cmd_cancel: ошибка при resume")
+        await state.clear()
+        await message.answer("Сценарий отменён.")
+        return
+
     if current in (AskFlow.waiting_for_topic, AskFlow.waiting_for_question):
-        logger.info("cmd_cancel: очистка состояния")
+        logger.info("cmd_cancel: очистка состояния AskFlow")
         await state.clear()
         await message.answer("Сценарий отменён.")
     else:
-        await message.answer("Нечего отменять.")
+        await state.clear()
+        await message.answer("Сценарий отменён.")
 
 
 @router.message(Command("clear"))
@@ -109,4 +133,4 @@ async def cmd_clear(
     await backend.clear_messages(
         chat_id, owner_external_id=str(message.chat.id)
     )
-    await message.answer("История очищена.", reply_markup=topics_kb())
+    await message.answer("История очищена.")

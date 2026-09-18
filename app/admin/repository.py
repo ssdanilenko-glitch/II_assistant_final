@@ -1,4 +1,9 @@
-"""AdminRepository: агрегации по таблицам chat_messages / chats / message_feedback.
+"""AdminRepository: агрегации по LangGraph-checkpoints и таблицам аналитики.
+
+Статистика активности берётся из LangGraph-checkpoints (таблица
+`checkpoint_blobs`, канал `messages`, msgpack). Таблицы chat_messages /
+chats заполняются только через /chats/* (команды бота), а основной диалог
+идёт через /agent/stream и хранится в чекпоинтах.
 
 PII-маскирование применяется только к экспорту, не к сторонним read-API.
 Внутренние логи/UI продолжают видеть исходный контент (это полезно для
@@ -6,7 +11,10 @@ PII-маскирование применяется только к экспор
 свои же сообщения с [EMAIL] и не поймёт, что произошло.
 """
 
+import logging
+import ormsgpack as msgpack
 from datetime import UTC, datetime, timedelta
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from sqlalchemy import func, select, text
 
@@ -14,48 +22,39 @@ from app.admin.schemas import ExportItem, ExportResult, StatsOut
 from app.chat.repositories.pg_models import RagQueryRow
 from app.observability.pii import mask_pii
 
+logger = logging.getLogger(__name__)
+_serde = JsonPlusSerializer()
+
 
 class AdminRepository:
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
     async def compute_stats(self, window_hours: int = 24) -> StatsOut:
-        """Активность за окно времени. `deleted_at` намеренно НЕ фильтруем:
-        soft-delete нужен LLM-контексту (после /clear прошлые сообщения не
-        подтягиваются в prompt), но факт активности юзера в окне остался —
-        статистика должна это видеть.
+        """Активность за окно времени.
+
+        Сообщения и активные пользователи — из LangGraph-checkpoints
+        (см. `_agent_stats`). Feedback — из `message_feedback` (таблица
+        создана моделью `MessageFeedbackRow`, пока пустая).
         """
         if self.session_factory is None:
             return StatsOut(total_messages=0, active_users=0)
         since = datetime.now(UTC) - timedelta(hours=window_hours)
         async with self.session_factory() as s:
-            total = await s.scalar(
-                text(
-                    "SELECT COUNT(*) FROM chat_messages WHERE created_at >= :since"
-                ),
-                {"since": since},
-            )
-            active = await s.scalar(
-                text(
-                    """
-                    SELECT COUNT(DISTINCT c.owner_external_id)
-                    FROM chats c
-                    JOIN chat_messages cm ON cm.chat_id = c.id
-                    WHERE cm.created_at >= :since
-                    """
-                ),
-                {"since": since},
-            )
+            try:
+                dau, messages = await self._agent_stats(s, since)
+            except Exception as exc:
+                logger.warning("compute_stats: agent_stats упал: %s", exc)
+                dau, messages = 0, 0
+
             fb = await s.execute(
-                text(
-                    """
+                text("""
                     SELECT
                         COUNT(*) FILTER (WHERE value='up') AS up,
                         COUNT(*) FILTER (WHERE value='down') AS down
                     FROM message_feedback
                     WHERE created_at >= :since
-                    """
-                ),
+                """),
                 {"since": since},
             )
             row = fb.first()
@@ -85,14 +84,58 @@ class AdminRepository:
 
         gaps = await self.knowledge_gaps(limit=10)
         return StatsOut(
-            total_messages=total or 0,
-            active_users=active or 0,
+            total_messages=messages or 0,
+            active_users=dau or 0,
             feedback_ratio=ratio,
             refusal_rate=refusal_rate,
             negative_feedback_rate=negative_rate,
             knowledge_gaps=gaps,
         )
 
+    async def _agent_stats(
+        self, session, since: datetime
+    ) -> tuple[int, int]:
+        """Возвращает (уникальных пользователей, сообщений) из checkpoints.
+
+        Blob'ы `messages` десериализуются через `JsonPlusSerializer` —
+        тот же сериализатор, которым LangGraph их писал (msgpack с
+        extensions для Pydantic-моделей BaseMessage).
+        """
+        stmt = text("""
+            SELECT DISTINCT ON (cb.thread_id)
+                cb.thread_id,
+                cb.type,
+                cb.blob
+            FROM checkpoint_blobs cb
+            JOIN checkpoints cp
+              ON cp.thread_id = cb.thread_id
+             AND cp.checkpoint_ns = cb.checkpoint_ns
+            WHERE cb.channel = 'messages'
+              AND cb.checkpoint_ns = ''
+              AND (cp.checkpoint->>'ts')::timestamptz >= :since
+            ORDER BY cb.thread_id, cb.version DESC
+        """)
+        result = await session.execute(stmt, {"since": since})
+        rows = result.all()
+
+        users: set[str] = set()
+        total_messages = 0
+        for row in rows:
+            try:
+                data = _serde.loads_typed((row.type, bytes(row.blob)))
+            except Exception as exc:
+                logger.warning(
+                    "agent_stats: не удалось распарсить blob %s (%s): %s",
+                    row.thread_id, row.type, exc,
+                )
+                continue
+            if isinstance(data, (list, tuple)) and data:
+                chat_id = str(row.thread_id).split("_")[0]
+                users.add(chat_id)
+                total_messages += len(data)
+
+        return len(users), total_messages
+    
     async def log_rag_query(
         self, question: str, confident: bool, top_score: float
     ) -> None:

@@ -96,3 +96,30 @@ class RateLimitRow(Base):
     __table_args__ = (
         UniqueConstraint('owner_external_id', 'kind', 'bucket', name='uq_rate_limits'),
     )
+
+class MessageFeedbackRow(Base):
+    """Оценка ответа ассистента (👍/👎) от пользователя.
+
+    Один пользователь может оставить одну оценку на сообщение —
+    при повторной оценке строка обновляется, а не дублируется.
+    """
+
+    __tablename__ = "message_feedback"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"),
+        index=True,
+    )
+    owner_external_id: Mapped[str] = mapped_column(index=True)
+    value: Mapped[str]              # 'up' | 'down'
+    created_at: Mapped[datetime] = mapped_column(
+        TimestampTZ, default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id", "owner_external_id",
+            name="uq_message_feedback_owner",
+        ),
+    )

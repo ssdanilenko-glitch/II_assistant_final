@@ -1,6 +1,6 @@
 from aiogram import Dispatcher
 
-from . import admin, commands, feedback, fsm, handoff, media, text
+from . import commands, fsm, text, admin,  handoff,feedback,  media
 
 
 def register_routers(dp: Dispatcher) -> None:

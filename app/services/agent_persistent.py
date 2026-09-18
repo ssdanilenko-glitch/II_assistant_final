@@ -29,7 +29,7 @@ from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from langchain_core.messages import AIMessage
 
-logger = logging.getLogger("llm-service")
+logger = logging.getLogger("it-assistant")
 MAX_ITERATIONS = 6
 DANGEROUS_TOOL = "send_email"
 
