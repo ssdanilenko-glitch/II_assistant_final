@@ -34,6 +34,7 @@ logging.basicConfig(level=logging.INFO)
 
 settings = get_settings()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # === Применяем создание таблиц (если их нет) ===
@@ -159,7 +160,7 @@ async def lifespan(app: FastAPI):
                 logger.info("[SEND_EMAIL] ✅ Email sent successfully")
 
         agent_tools = [build_search_knowledge_base(_search_kb)]
-        system_prompt =  build_system_prompt("")
+        system_prompt =  build_system_prompt(settings.exchange_recipient_email)
         app.state.agent_graph = await agent_stack.enter_async_context(
             agent_lifespan(
                 settings.agent_checkpointer,

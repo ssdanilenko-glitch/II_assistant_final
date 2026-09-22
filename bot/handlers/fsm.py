@@ -22,9 +22,7 @@ async def on_confirm_action(cb: CallbackQuery, backend: BackendClient, state: FS
     except Exception:
         pass
 
-    # Извлекаем decision и thread_id по префиксам. Нельзя split("_")[-1]:
-    # unique thread_id = "443426947_1734123456789" содержит подчёркивание,
-    # и split вернёт только timestamp — LangGraph не найдёт чекпоинт.
+    # Извлекаем decision и thread_id по префиксам.
     if cb.data.startswith("confirm_send_"):
         decision = True
         thread_id = cb.data[len("confirm_send_"):]
@@ -34,27 +32,24 @@ async def on_confirm_action(cb: CallbackQuery, backend: BackendClient, state: FS
     else:
         await cb.answer("Неизвестная команда")
         return
-    
+
     try:
         events = backend.resume(
             thread_id=thread_id,
             decision=decision,
-            owner_external_id=str(cb.from_user.id)
+            owner_external_id=str(cb.message.chat.id),
         )
+
+        # stream_to_chat сам разберётся с assistant_text / token / interrupt
         result = await stream_to_chat(cb.message, events)
-        if result.get("status") == "interrupt":
-            await cb.message.answer("Произошла ещё одна задержка. Попробуйте снова.")
-        else:
-            log.info("on_confirm_action: очистка состояния после успешного resume")
-            await state.clear()
-            await cb.message.answer("✅ Заявка отправлена" if decision else "❌ Отменено")
+
+        await state.clear()
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
     except Exception:
         log.exception("Ошибка при resume")
         await cb.message.answer("Не удалось обработать решение. Попробуйте позже.")
         await state.clear()
-
-    # Убираем клавиатуру у сообщения
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass

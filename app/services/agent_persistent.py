@@ -28,8 +28,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from langchain_core.messages import AIMessage
+import unicodedata
 
-logger = logging.getLogger("it-assistant")
+logger = logging.getLogger("it_assistant")
 MAX_ITERATIONS = 6
 DANGEROUS_TOOL = "send_email"
 
@@ -45,6 +46,28 @@ class PersistentAgentState(TypedDict):
     draft: dict | None  # payload письма, подготовленный prepare_email (до отправки)
     sent: bool  # выполнен ли side-effect отправки
 
+def _looks_like_sender_line(line: str) -> bool:
+    """Первая строка начинается с П/Pользователь: …"""
+    line = line.lstrip("\ufeff\u200b\u200e\u200f ").strip()
+    if len(line) < 11:
+        return False
+    first = line[0]
+    # латинская P и кириллическая П — обе считаем валидными
+    if first not in ("П", "P", "п", "p"):
+        return False
+    # «ользователь» — все кириллические, но на всякий случай
+    # сравниваем после нормализации NFC
+    tail = unicodedata.normalize("NFC", line[1:11]).lower()
+    return tail == "ользовател"
+
+def _strip_sender_prefix(body: str) -> str:
+    body = body.lstrip("\ufeff\u200b\u200e\u200f ")
+    while True:
+        line, sep, rest = body.partition("\n")
+        if not _looks_like_sender_line(line):
+            break
+        body = rest.lstrip()
+    return body
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
@@ -132,28 +155,32 @@ def build_agent(
     async def prepare_email(state: PersistentAgentState) -> dict:
         call = _find_call(state["messages"][-1], DANGEROUS_TOOL)
         args = call["args"]
+        body = _strip_sender_prefix(args.get("body") or "")
+
+        # Срезаем ВСЕ ведущие строки «Пользователь: …» — их могло
+        # вставить несколько (промпт + инерция истории).
+        while body.startswith("Пользователь:"):
+            _, _, body = body.partition("\n")
+            body = body.lstrip()
+
+        # sender_info берём из первого human-сообщения — там он гарантированно есть.
+        sender_info = ""
+        for m in state["messages"]:
+            mtype = getattr(m, "type", "")
+            if mtype != "human":
+                continue
+            content = getattr(m, "content", "")
+            if isinstance(content, str) and content.lstrip().startswith("Пользователь:"):
+                sender_info = content.strip().split("\n", 1)[0]
+                break
+
         draft = {
             "to": args.get("to", ""),
             "subject": args.get("subject", ""),
-            "body": args.get("body", ""),
+            "body": f"{sender_info}\n\n{body}" if sender_info else body,
             "tool_call_id": call["id"],
         }
-        logger.info(f"[prepare_email] Draft created: to={draft['to']}, subject={draft['subject']}")
-        # Фразу-отказ добавляем ТОЛЬКО для заявок в HelpDesk.
-        # Если это свободная отправка («Отправь ответ на адрес X») —
-        # не подменяем body страховкой.
-        last = state["messages"][-1]
-        current_text = str(getattr(last, "content", "") or "").strip()
-        update: dict = {"draft": draft}
-        is_helpdesk = draft["subject"].startswith("Заявка в HelpDesk")
-        if len(current_text) < 30 and is_helpdesk:
-            update["messages"] = [
-                AIMessage(
-                    content="В базе знаний нет ответа на этот вопрос.\n\n"
-                            "Я подготовил заявку в HelpDesk — подтвердите отправку."
-                )
-            ]
-        return update
+        return {"draft": draft}
 
     async def confirm_and_send(
             state: PersistentAgentState, config: RunnableConfig
@@ -216,11 +243,12 @@ def build_agent(
             f"[route_after_model] iteration={state.get('iteration_count', 0)}, tool_calls={getattr(state['messages'][-1], 'tool_calls', None) if state['messages'] else None}")
         if state.get("iteration_count", 0) >= MAX_ITERATIONS:
             return "force_finish"
+        if state.get("sent", False):
+            return "force_finish"
         last = state["messages"][-1]
         calls = getattr(last, "tool_calls", None)
         if not calls:
             return "force_finish"
-
         if any(call["name"] == DANGEROUS_TOOL for call in calls):
             return "prepare_email"
         return "execute_tool"

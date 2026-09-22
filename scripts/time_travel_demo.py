@@ -48,8 +48,8 @@ class FakeChat:
                     "name": "send_email",
                     "args": {
                         "to": "client@example.com",
-                        "subject": "Счёт №42",
-                        "body": "Ваш счёт во вложении.",
+                        "subject": "Ваше обращение №123456",
+                        "body": "Ваш запрос во вложении.",
                     },
                     "id": "call-1",
                     "type": "tool_call",
@@ -60,7 +60,7 @@ class FakeChat:
 
 def _initial() -> dict:
     return {
-        "messages": [HumanMessage("отправь клиенту счёт")],
+        "messages": [HumanMessage("отправь вопрос на help desk")],
         "iteration_count": 0,
         "tool_results": [],
         "draft": None,

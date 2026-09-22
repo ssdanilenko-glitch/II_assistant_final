@@ -257,6 +257,7 @@ curl http://localhost:8000/ready
 - **tests/** — тесты, написанные по ходу курса
 - **Ссылка на видео-демонстрацию** — будет добавлена после записи
 - **Репозиторий проекта** — https://github.com/ssdanilenko-glitch/itassistant_final
+- **Презентация** — [docs/presentation.pdf](docs/presentation.pdf)
 
 ## Документация
 

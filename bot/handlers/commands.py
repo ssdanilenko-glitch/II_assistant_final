@@ -126,6 +126,7 @@ async def cmd_clear(
 ) -> None:
     logger.info("cmd_clear: очистка состояния")
     await state.clear()
+    await backend.clear_agent_thread(f"tg-{message.chat.id}")
     chat_id = await backend.get_or_create_chat(
         owner_external_id=str(message.chat.id),
         interface="telegram",

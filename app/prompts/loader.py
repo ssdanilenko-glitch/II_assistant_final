@@ -13,7 +13,5 @@ def _read_prompt_file(filename: str) -> str:
 
 SYSTEM_PROMPT_TEMPLATE = _read_prompt_file("System_prompt_agent.txt")
 
-def build_system_prompt(service_name: str) -> str:
-    return SYSTEM_PROMPT_TEMPLATE.format(
-        service_name=service_name,
-    )
+def build_system_prompt(helpdesk_email: str) -> str:
+    return SYSTEM_PROMPT_TEMPLATE.format(helpdesk_email=helpdesk_email)
