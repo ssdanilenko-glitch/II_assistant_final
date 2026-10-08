@@ -66,3 +66,25 @@ data/rag-block-03/
 *_docstore.json
 data/*_docstore.json
 data/*_docstore.json.bak
+# Секреты
+.env
+
+# Корпус — не публикуется по требованиям ИБ
+data/rag-block-03/
+data/rag-block-*/
+data/**/*.docx
+data/**/*.pdf
+
+# Генерируемые артефакты
+*_docstore.json
+data/*_docstore.json
+data/data/
+
+# JSON-хранилище чатов (дублирует Postgres)
+data/chats/
+
+# Временное и служебное
+*.mp4
+check_*.py
+.idea/
+.idea.backup/
