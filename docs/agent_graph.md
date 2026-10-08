@@ -13,9 +13,9 @@ Mermaid-исходник: [`agent-graph-custom.mmd`](agent-graph-custom.mmd).
 ## Узлы
 
 | Узел | Назначение |
-|---|---|
+|-|---|
 | `call_model` | Вызов LLM с текущим состоянием диалога и доступными инструментами |
-| `execute_tool` | Выполнение **безопасных** инструментов (`search_knowledge_base`, `multiply`) |
+| `execute_tool` | Выполнение **безопасных** инструментов (`search_knowledge_base`, `get_helpdesk_status`) |
 | `prepare_email` | Формирование черновика письма (тема, тело, вложения) — **без отправки** |
 | `confirm_and_send` | Точка `interrupt()` — приостановка до подтверждения, затем отправка через SMTP |
 | `force_finish` | Принудительное завершение при отсутствии tool_calls или превышении лимита итераций |
@@ -30,7 +30,7 @@ Mermaid-исходник: [`agent-graph-custom.mmd`](agent-graph-custom.mmd).
 | `call_model` | `force_finish` | Нет tool_calls **или** превышен лимит итераций |
 | `execute_tool` | `call_model` | Всегда (возврат результата инструмента в LLM) |
 | `prepare_email` | `confirm_and_send` | Всегда |
-| `confirm_and_send` | `force_finish` | После подтверждения и отправки (или отказа) |
+| `confirm_and_send` | `call_model` | После подтверждения и отправки (или отказа) — модель формирует финальное сообщение пользователю |
 | `force_finish` | `END` | Всегда |
 
 ## Human-in-the-loop
@@ -47,7 +47,27 @@ Mermaid-исходник: [`agent-graph-custom.mmd`](agent-graph-custom.mmd).
 5. Пользователь нажимает кнопку → backend вызывает `/agent/resume` →
    граф продолжается с точки останова.
 6. Если «Отправить» — SMTP-отправка. Если «Отмена» — выход без отправки.
+7. Граф возвращается в `call_model`, который формирует финальное сообщение
+   («Письмо отправлено» / «Отправка отменена»).
 7. `force_finish` завершает сессию.
+
+## Инструменты
+
+| Инструмент | Назначение | Тип |
+|---|---|---|
+| `search_knowledge_base(query)` | Поиск ответа в корпоративной базе знаний | безопасный |
+| `get_helpdesk_status(ticket_id)` | Статус заявки в HelpDesk (Redis / Itilium) | безопасный |
+| `send_email(to, subject, body)` | Отправка письма через SMTP | опасный (HIL) |
+
+`send_email` **не исполняется в `execute_tool`** — маршрутизация в
+`route_after_model` направляет его в отдельную ветку
+`prepare_email → confirm_and_send` с `interrupt()`.
+
+`get_helpdesk_status` читает `helpdesk:ticket:{ticket_id}` из Redis.
+Ключ наполняется webhook'ом `/webhook/helpdesk`. Если записи нет —
+возвращается `status="not_found"`, и ассистент сообщает пользователю,
+что заявка не найдена. В плане развития — REST-коннектор к 1С:Itilium
+вместо Redis-кеша.
 
 ## Персистентность
 
@@ -60,7 +80,8 @@ Mermaid-исходник: [`agent-graph-custom.mmd`](agent-graph-custom.mmd).
 
 ## Ограничения графа
 
-- **Один агент с инструментами.** Мультиагентность не используется —
+- **Один агент с тремя инструментами** (`search_knowledge_base`,
+  `get_helpdesk_status`, `send_email`). Мультиагентность не используется —
   избыточна для текущих задач.
 - **Нет ветки ошибок.** Исключения инструментов обрабатываются внутри
   узлов и возвращаются в LLM как `ToolMessage` с текстом ошибки — модель

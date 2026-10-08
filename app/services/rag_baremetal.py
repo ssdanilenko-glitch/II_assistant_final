@@ -134,8 +134,8 @@ def _demo() -> None:
     service = BareMetalRAG(get_settings())
     service.ensure_indexed()
     for question in (
-        "За сколько дней можно вернуть деньги за подписку?",
-        "Как приготовить плов?",
+        "Как подключить wifi на БМЗ для доступа в интернет?",
+        "Как заварить кофе?",
     ):
         result = service.answer(question)
         print(f"\nВопрос: {question}")

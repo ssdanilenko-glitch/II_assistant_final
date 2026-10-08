@@ -16,3 +16,6 @@ class LLMTimeoutError(LLMError):
 
 class LLMContentFilterError(LLMError):
     """Контент заблокирован модерацией."""
+
+class LLMUnavailableError(LLMError):
+    """LLM-сервер недоступен (connection error)."""

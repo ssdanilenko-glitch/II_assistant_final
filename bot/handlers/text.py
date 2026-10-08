@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import time
+import uuid
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
@@ -76,15 +76,24 @@ async def on_text(message: Message, backend: BackendClient, state: FSMContext) -
     if await state.get_state() == ConfirmFlow.waiting_for_decision:
         return
 
+    # thread_id из текущей сессии (создан в /start или предыдущем сообщении).
+    data = await state.get_data()
+    thread_id = data.get("thread_id")
+    if not thread_id:
+        # Защита: пользователь пишет без /start. Создаём сессию на лету.
+        thread_id = f"tg-{message.chat.id}-{uuid.uuid4().hex[:8]}"
+        await state.update_data(thread_id=thread_id)
+        log.info("on_text: создана сессия на лету thread_id=%s", thread_id)
+
     stop = asyncio.Event()
     typing_task = asyncio.create_task(typing_until(message.bot, message.chat.id, stop))
 
     try:
-        thread_id = f"tg-{message.chat.id}"
         sender_info = get_sender_info(message)
         content_with_sender = f"{sender_info}\n\n{message.text}"
 
         # ОДИН вызов — один SSE-поток — один проход.
+        # thread_id уже определён выше, НЕ перезаписываем его здесь.
         events = backend.send_message(
             content=content_with_sender,
             owner_external_id=str(message.chat.id),
@@ -95,17 +104,30 @@ async def on_text(message: Message, backend: BackendClient, state: FSMContext) -
 
         if result.get("status") == "interrupt":
             await state.set_state(ConfirmFlow.waiting_for_decision)
+            # thread_id уже в state — просто обновим на всякий случай
             await state.update_data(thread_id=thread_id)
+
             preview = result.get("payload", {}).get("preview", {})
+            sender = preview.get("sender_info", "")
+            body = preview.get("body", "")
             text_preview = (
                 f"📧 <b>Подтверждение отправки письма</b>\n"
                 f"Кому: {preview.get('to', '')}\n"
                 f"Тема: {preview.get('subject', '')}\n"
-                f"Текст: {preview.get('body', '')[:200]}..."
             )
+            if sender:
+                text_preview += f"От: {sender}\n"
+            text_preview += f"\n{body[:200]}..."
+
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="✅ Отправить", callback_data=f"confirm_send_{thread_id}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"confirm_cancel_{thread_id}"),
+                InlineKeyboardButton(
+                    text="✅ Отправить",
+                    callback_data=f"confirm_send_{thread_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"confirm_cancel_{thread_id}",
+                ),
             ]])
             await message.answer(text_preview, reply_markup=kb, parse_mode="HTML")
 

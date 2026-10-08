@@ -22,15 +22,20 @@ from app.core.exceptions import (
     LLMError,
     LLMRateLimitError,
     LLMTimeoutError,
+    LLMUnavailableError,
 )
 from app.observability import setup_tracing
 from app.prompts.loader import build_system_prompt
-from app.routers import agent, chat, documents, health, models, rag
+from app.routers import agent, chat, documents, health, helpdesk, models, rag
 from app.routers import media as media_router
 from app.services.email_service import get_email_service
+from app.services.thread_id import parse_chat_id
+
 
 logger = logging.getLogger("it_assistant")
 logging.basicConfig(level=logging.INFO)
+
+HELPDESK_TICKET_TTL = 7 * 24 * 3600  # 7 дней
 
 settings = get_settings()
 
@@ -98,7 +103,10 @@ async def lifespan(app: FastAPI):
     try:
         from langchain_openai import ChatOpenAI
 
-        from app.agents.tools import build_search_knowledge_base
+        from app.agents.tools import (
+            build_get_helpdesk_status,
+            build_search_knowledge_base,
+        )
         from app.services.agent_persistent import agent_lifespan
 
         agent_model = ChatOpenAI(
@@ -107,6 +115,7 @@ async def lifespan(app: FastAPI):
             temperature=0,
             api_key=settings.llm.openai_api_key.get_secret_value(),
             timeout=settings.llm.request_timeout,
+            max_retries=settings.llm.max_retries,
         )
 
         async def _search_kb(query: str) -> dict:
@@ -121,26 +130,30 @@ async def lifespan(app: FastAPI):
             to = draft.get("to")
             subject = draft.get("subject", "")
             body = draft.get("body", "")
+            corr_id = draft.get("correlation_id", "")
+            thread_id = draft.get("thread_id")
 
             if not to:
                 logger.error("Не указан получатель")
                 return
 
-            # Загружаем вложения из Redis, если есть thread_id
+            # Correlation id в конец тела — HelpDesk вернёт его в webhook.
+            if corr_id:
+                body = f"{body}\n\n---\nСлужебный идентификатор: {corr_id}"
+
+            # Вложения из Redis.
             attachments = []
-            thread_id = draft.get("thread_id")
             if thread_id and app.state.redis is not None:
                 try:
                     redis_key = f"media:{thread_id}"
                     raw = await app.state.redis.get(redis_key)
                     if raw:
                         import json
-                        files_data = json.loads(raw)  # список словарей с filename, data_base64, mime
+                        files_data = json.loads(raw)
                         for item in files_data:
                             import base64
                             data = base64.b64decode(item["data"])
                             attachments.append((item["filename"], data, item.get("mime", "application/octet-stream")))
-                        # Удаляем ключ после загрузки
                         await app.state.redis.delete(redis_key)
                         logger.info(f"Загружено {len(attachments)} вложений для письма")
                 except Exception as e:
@@ -156,10 +169,95 @@ async def lifespan(app: FastAPI):
 
             if not success:
                 logger.error(f"[SEND_EMAIL]  Failed to send to {to}")
-            else:
-                logger.info("[SEND_EMAIL] ✅ Email sent successfully")
+                return
 
-        agent_tools = [build_search_knowledge_base(_search_kb)]
+            logger.info("[SEND_EMAIL] ✅ Email sent successfully")
+
+            # Маппинг correlation_id → chat_id.
+            if corr_id and thread_id and app.state.redis is not None:
+                try:
+                    chat_id = parse_chat_id(thread_id)
+                    if chat_id:
+                        await app.state.redis.set(
+                            f"helpdesk:corr:{corr_id}",
+                            chat_id,
+                            ex=24 * 3600,
+                        )
+                        logger.info(
+                            f"helpdesk:corr:{corr_id} → chat_id={chat_id} сохранён (TTL 24ч)"
+                        )
+                    else:
+                        logger.warning(
+                            "не удалось извлечь chat_id из thread_id=%r", thread_id
+                        )
+                except Exception:
+                    logger.exception("не удалось сохранить correlation_id в Redis")
+
+        async def _get_helpdesk_status(ticket_id: str) -> dict:
+            """Возвращает статус заявки HelpDesk по номеру.
+
+            Данные читаются из Redis (`helpdesk:ticket:{ticket_id}`), куда их
+            кладёт webhook `/webhook/helpdesk` (в демо — через `scripts/fake_helpdesk.py`).
+
+            Если заявки нет в Redis — возвращается `status="not_found"`.
+            Ассистент честно сообщает, что заявка не найдена, и не выдумывает
+            статус.
+
+            В плане развития — REST-коннектор к 1С:Itilium вместо Redis-кеша.
+            """
+            if not ticket_id:
+                return {
+                    "ticket_id": "",
+                    "status": "not_found",
+                    "message": "Номер заявки не указан.",
+                }
+
+            if app.state.redis is None:
+                logger.warning("[GET_HELPDESK_STATUS] Redis недоступен")
+                return {
+                    "ticket_id": ticket_id,
+                    "status": "service_unavailable",
+                    "message": "Сервис статусов временно недоступен.",
+                }
+
+            try:
+                raw = await app.state.redis.get(f"helpdesk:ticket:{ticket_id}")
+            except Exception:
+                logger.exception(
+                    "[GET_HELPDESK_STATUS] Redis lookup failed ticket=%s", ticket_id
+                )
+                return {
+                    "ticket_id": ticket_id,
+                    "status": "service_unavailable",
+                    "message": "Ошибка чтения статуса заявки.",
+                }
+
+            if not raw:
+                logger.info(
+                    "[GET_HELPDESK_STATUS] not_found ticket=%s (нет в Redis)", ticket_id
+                )
+                return {
+                    "ticket_id": ticket_id,
+                    "status": "not_found",
+                    "message": (
+                        f"Заявка {ticket_id} не найдена. "
+                        "Возможно, номер указан неверно или заявка была создана "
+                        "в другой системе."
+                    ),
+                }
+
+            import json
+            data = json.loads(raw)
+            logger.info(
+                "[GET_HELPDESK_STATUS] Redis hit ticket=%s status=%s",
+                ticket_id, data.get("status"),
+            )
+            return {"ticket_id": ticket_id, **data}
+
+        agent_tools = [
+            build_search_knowledge_base(_search_kb),
+            build_get_helpdesk_status(_get_helpdesk_status),
+        ]
         system_prompt =  build_system_prompt(settings.exchange_recipient_email)
         app.state.agent_graph = await agent_stack.enter_async_context(
             agent_lifespan(
@@ -261,6 +359,7 @@ _STATUS_MAP: list[tuple[type[LLMError], int, str]] = [
     (LLMAuthError, 502, "llm_auth_error"),
     (LLMTimeoutError, 504, "llm_timeout"),
     (LLMContentFilterError, 400, "content_filter"),
+    (LLMUnavailableError, 503, "llm_unavailable"),
     (LLMError, 502, "llm_error"),
 ]
 
@@ -302,3 +401,4 @@ app.include_router(rag.router)
 app.include_router(documents.router)
 app.include_router(agent.router)
 app.include_router(media_router.router)
+app.include_router(helpdesk.router)

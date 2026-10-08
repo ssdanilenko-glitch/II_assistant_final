@@ -4,8 +4,6 @@ Pattern: fire_alert пишет строку в alerts (jsonb payload), бот п
 drain'ит pending → шлёт в админ-чат → ack. Это даёт at-least-once delivery
 без внешнего message broker'а.
 
-Для PoC хватает; в проде стоит подумать про partitioning по created_at
-и cleanup acked-строк cron'ом.
 """
 
 import json

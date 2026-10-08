@@ -12,7 +12,7 @@ PII-маскирование применяется только к экспор
 """
 
 import logging
-import ormsgpack as msgpack
+from app.services.thread_id import parse_chat_id
 from datetime import UTC, datetime, timedelta
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -130,8 +130,9 @@ class AdminRepository:
                 )
                 continue
             if isinstance(data, (list, tuple)) and data:
-                chat_id = str(row.thread_id).split("_")[0]
-                users.add(chat_id)
+                chat_id = parse_chat_id(row.thread_id)
+                if chat_id:
+                    users.add(chat_id)
                 total_messages += len(data)
 
         return len(users), total_messages

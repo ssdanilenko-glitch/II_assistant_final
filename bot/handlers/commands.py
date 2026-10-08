@@ -12,6 +12,7 @@ from bot.services.backend_client import BackendClient
 
 from bot.services.streaming import stream_to_chat
 from bot.states import AskFlow, ConfirmFlow
+import uuid
 
 logger = logging.getLogger(__name__)
 router = Router(name="commands")
@@ -23,6 +24,12 @@ async def cmd_start(
 ) -> None:
     """Приветствие. Кнопки — по команде /ask."""
     await state.clear()
+
+    # Новый thread на каждый /start — контекст предыдущей сессии не подтягивается.
+    new_thread_id = f"tg-{message.chat.id}-{uuid.uuid4().hex[:8]}"
+    await state.update_data(thread_id=new_thread_id)
+    logger.info("cmd_start: новая сессия thread_id=%s", new_thread_id)
+
     try:
         await backend.get_or_create_chat(
             owner_external_id=str(message.chat.id),
@@ -121,17 +128,23 @@ async def cmd_cancel(
 
 
 @router.message(Command("clear"))
-async def cmd_clear(
-        message: Message, backend: BackendClient, state: FSMContext
-) -> None:
-    logger.info("cmd_clear: очистка состояния")
+async def cmd_clear(message: Message, backend: BackendClient, state: FSMContext) -> None:
+    """Начать новую сессию. Старая история остаётся в БД, но недоступна."""
     await state.clear()
-    await backend.clear_agent_thread(f"tg-{message.chat.id}")
-    chat_id = await backend.get_or_create_chat(
-        owner_external_id=str(message.chat.id),
-        interface="telegram",
-    )
-    await backend.clear_messages(
-        chat_id, owner_external_id=str(message.chat.id)
-    )
-    await message.answer("История очищена.")
+
+    new_thread_id = f"tg-{message.chat.id}-{uuid.uuid4().hex[:8]}"
+    await state.update_data(thread_id=new_thread_id)
+    logger.info("cmd_clear: новая сессия thread_id=%s", new_thread_id)
+
+    try:
+        chat_id = await backend.get_or_create_chat(
+            owner_external_id=str(message.chat.id),
+            interface="telegram",
+        )
+        await backend.clear_messages(
+            chat_id, owner_external_id=str(message.chat.id)
+        )
+    except Exception:
+        logger.exception("clear_messages failed")
+
+    await message.answer("Начинаем новую сессию.")

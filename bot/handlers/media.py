@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 from io import BytesIO
+import uuid
 
 import httpx
 from aiogram import F, Router
@@ -67,13 +68,19 @@ def _pick_photo_size(photos):
 async def _send_media_as_text(
     message: Message,
     backend: BackendClient,
-    state: FSMContext,      # добавлено
+    state: FSMContext,
     data: bytes,
     mime: str,
     filename: str,
     content: str = "",
 ):
-    thread_id = str(message.chat.id)
+    # thread_id из текущей сессии (создан в /start или предыдущем сообщении).
+    state_data = await state.get_data()
+    thread_id = state_data.get("thread_id")
+    if not thread_id:
+        thread_id = f"tg-{message.chat.id}-{uuid.uuid4().hex[:8]}"
+        await state.update_data(thread_id=thread_id)
+        log.info("media: создана сессия на лету thread_id=%s", thread_id)
 
     # Сохраняем файл в Redis
     redis = get_redis()

@@ -3,33 +3,32 @@
 
 ## 1. Backend чек-пойнтера
 
-Чек-пойнтер переключается переменной `AGENT_CHECKPOINTER` (`memory` / `sqlite` / `postgres`), которую читает фабрика `build_agent(checkpointer)` в `app/services/agent_persistent.py`.
+Режим выбирается переменной `AGENT_CHECKPOINTER` (`memory` / `sqlite` / `postgres`), которую читает `agent_lifespan` в `app/services/agent_persistent.py`.
 
-| Режим | `AGENT_CHECKPOINTER` | Где используется | Зачем |
-|---|---|---|---|
-| Локальная разработка / тесты | `sqlite` (дефолт) | разработчик, `pytest` | `AsyncSqliteSaver.from_conn_string(":memory:")` — без сети и Postgres |
-| Docker-compose / staging | `postgres` | сервис `app` | тот же Postgres из МЗБ5, отдельная БД не заводится |
-| In-memory | `memory` | unit-тесты старого `agent_graph.py` | быстрый прогон без БД |
+| Режим | Где применяется | Почему |
+|---|---|---|
+| `sqlite` | локальная разработка, `pytest` | `AsyncSqliteSaver.from_conn_string(":memory:")` — без сети, воспроизводимо |
+| `postgres` | docker-compose, staging | тот же Postgres, что и для FastAPI из МЗБ5; отдельная БД не плодится |
+| `memory` | unit-тесты старого графа | быстрый прогон без чек-пойнтера |
 
-`AGENT_CHECKPOINTER=postgres` не захардкожен в `compose.yaml`. Значение лежит в `.env`, а сервис `app` подключает его через директиву `env_file`. Сервис `postgres` не меняется — используется существующий инстанс из МЗБ5 и те же `POSTGRES_*` переменные.
+`AGENT_CHECKPOINTER=postgres` приходит из `.env`, сервис `app` получает его через `env_file`. Сервис `postgres` не меняется — используется существующий инстанс МЗБ5.
 
-`await checkpoint.setup()` вызывается ровно один раз в `agent_lifespan()` при старте FastAPI, не на каждый запрос. Для `AsyncPostgresSaver` создаёт `checkpoints`, `checkpoint_writes`, `checkpoint_blobs`, `checkpoint_migrations`; для `AsyncSqliteSaver` — DDL поверх пустого файла.
+`await checkpoint.setup()` вызывается один раз в `agent_lifespan`. Для `AsyncPostgresSaver` создаются таблицы `checkpoints`, `checkpoint_writes`, `checkpoint_blobs`, `checkpoint_migrations`. Для `AsyncSqliteSaver` — DDL поверх пустого файла. На каждый HTTP-запрос `setup()` не вызывается.
+
+В `alembic/env.py` добавлен `include_name`, исключающий эти таблицы из autogenerate. Схему чек-пойнтера ведёт `setup()`, доменную — Alembic.
 
 ## 2. Postgres в compose
 
-Сервис `postgres` остаётся неизменным. Изменения только в сервисе `app`:
+Сервис `postgres` остаётся без изменений. В `compose.yaml` сервис `app` уже подписан на `.env`:
 
 ```yaml
 services:
   app:
     env_file:
-      - .env          # AGENT_CHECKPOINTER=postgres
+      - .env
     depends_on:
-      - postgres
-      - redis
-
-  postgres:
-    # без изменений
+      postgres:
+        condition: service_healthy
 ```
 
 `.env`:
@@ -38,88 +37,74 @@ services:
 AGENT_CHECKPOINTER=postgres
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
-POSTGRES_USER=agent
-POSTGRES_PASSWORD=agent
-POSTGRES_DB=agent_db
+POSTGRES_USER=chat
+POSTGRES_PASSWORD=chat
+POSTGRES_DB=chat
+DATABASE_URL=postgresql+asyncpg://chat:chat@postgres:5432/chat
 ```
 
-URI собирается из тех же `POSTGRES_*`, что и DSN FastAPI:
+URI для `AsyncPostgresSaver` собирается из тех же `POSTGRES_*` через `_psycopg_uri()` — заменяет `+asyncpg` на чистый `postgresql://`.
 
-```
-postgresql://agent:agent@postgres:5432/agent_db
-```
-
-Проверка после `setup()`:
+Проверка после старта:
 
 ```bash
-$ docker compose exec postgres psql -d agent_db -c '\dt'
+$ docker compose exec postgres psql -U chat -d chat -c '\dt'
                 List of relations
  Schema |         Name          | Type  | Owner
 --------+-----------------------+-------+-------
- public | checkpoint_blobs      | table | agent
- public | checkpoint_migrations | table | agent
- public | checkpoint_writes     | table | agent
- public | checkpoints           | table | agent
+ public | checkpoint_blobs      | table | chat
+ public | checkpoint_migrations | table | chat
+ public | checkpoint_writes     | table | chat
+ public | checkpoints           | table | chat
 (4 rows)
 ```
 
-Alembic не удаляет `checkpoint*`-таблицы — в `alembic/env.py` добавлен `include_name`:
+## 3. Опасный tool
+
+**Tool:** `send_email` — отправка письма наружу (HelpDesk, клиенту, на произвольный адрес). Опасность: необратимый side-effect, письмо уходит реальному получателю, откатить нельзя.
+
+Граф разбит на три узла с edge между подготовкой и отправкой:
+
+```
+__start__ → call_model → prepare_email → confirm_and_send → call_model → force_finish → END
+```
+
+### До `interrupt()` — `prepare_email` (idempotent)
+
+- извлекает `tool_call send_email` из последнего `AIMessage`;
+- нормализует `body`: `_strip_sender_prefix()` срезает все ведущие шапки «Пользователь: …» (с учётом латинской `P` и невидимых символов);
+- `_extract_sender_info()` берёт шапку из первого `HumanMessage` в state;
+- если в body шапки нет, а в state есть — вклеивает её один раз;
+- генерирует `correlation_id = uuid4().hex[:12]`;
+- **никаких сетевых вызовов**, состояние только читается.
+
+Затем `confirm_and_send` вызывает `interrupt({"type": "approve_email", "preview": draft})`. Граф останавливается.
+
+### После `interrupt()` — `confirm_and_send`
 
 ```python
-def include_name(name, type_, parent_names):
-    if type_ == "table":
-        return name not in {
-            "checkpoints", "checkpoint_writes",
-            "checkpoint_blobs", "checkpoint_migrations",
-        }
-    return True
-
-context.configure(..., include_name=include_name)
+approved = decision is True or decision == "approve"
+if approved:
+    await send_email_fn(draft)   # реальный SMTP
+    content = f"письмо отправлено: {draft['subject']}"
+else:
+    content = "отправка отменена пользователем"
 ```
 
-Схему чек-пойнтера ведёт `checkpoint.setup()`, доменную — Alembic.
+**Почему так:** если `send_email_fn` вызвать до `interrupt()`, при resume узел перезапустится с начала и письмо уйдёт дважды. `prepare_email` идемпотентен, side-effect — только после resume.
 
-## 3. Опасный tool и точки до/после interrupt
-
-**Tool:** `send_email` — отправка письма клиенту. Опасность: необратимый side-effect наружу (SMTP/API), письмо уходит реальному получателю.
-
-Граф:
-
-```
-__start__ → call_model → prepare_email → confirm_and_send → END
-```
-
-### До interrupt (`prepare_email`, идемпотентный узел)
-
-- валидация tool_call (наличие `to`, `subject`, `body`);
-- рендер финального шаблона из state;
-- запись `draft = {"to", "subject", "body", "tool_call_id", "thread_id"}` в state;
-- никаких сетевых вызовов.
-
-Затем:
-
-```python
-decision = interrupt({"type": "approve_email", "preview": state["draft"]})
-```
-
-### После interrupt (`confirm_and_send`, единственная точка side-effect)
-
-```python
-if decision is True:
-    await send_fn(state["draft"])
-    return {"sent": True}
-return {"sent": False}
-```
-
-Почему так: если поставить `send_fn` до `interrupt()`, при resume узел перезапустится с начала, и письмо уйдёт дважды. Неидемпотентные шаги (например, генерация `tracking_id`) выносятся в отдельный детерминированный шаг по `request_id` из state.
-
-**Правило:** до `interrupt()` — только подготовка (рендер, валидация, чтение БД); после `interrupt()` — сам side-effect, в отдельном узле.
+**Правило блока:** до `interrupt()` — подготовка (валидация, рендер, чтение БД); после `interrupt()` — side-effect в отдельном узле.
 
 `interrupt_before` / `interrupt_after` не используются. Канон LangGraph 1.0 — `interrupt()` + `Command(resume=...)`.
 
-## 4. Логи interrupt и resume
+После confirm_and_send граф возвращает управление в call_model,
+который формирует финальный AIMessage («Письмо отправлено» /
+«Отправка отменена»). Защита от зацикливания — флаг sent=True в
+route_after_model.
 
-Запуск: `uv run python -m scripts.time_travel_demo` (офлайн, `AsyncSqliteSaver(":memory:")`, `FakeChat`).
+## 4. Логи: `__interrupt__` и resume
+
+**Момент `__interrupt__` (фрагмент лога `scripts/time_travel_demo.py`):**
 
 ```
 1) INTERRUPT payload: {
@@ -134,27 +119,43 @@ return {"sent": False}
 }
 ```
 
-Граф остановился в `confirm_and_send`, `sent=False`, `draft` готов, письма нет.
+**Момент после `Command(resume=True)`:**
 
 ```
 4) две ветки: отказ → sent=False, одобрение → sent=True, отправок=1
 ```
 
-`sent_log` содержит ровно одну запись — только одобренная ветка.
+Из логов боевого сценария (`docker compose logs app`):
+
+```
+[prepare_email] raw_body='Пользователь предоставил изображение с текстом вопроса: …'
+[prepare_email] after_strip='Пользователь предоставил изображение с текстом вопроса: …'
+[confirm_and_send] decision=True (type=<class 'bool'>), approved=True
+[confirm_and_send] calling send_email_fn with draft: {
+  'to': 'danilenko@ukbmz.ru',
+  'subject': 'Заявка в HelpDesk: …',
+  'body': 'Пользователь: Sergey Danilenko (ID: 443426947, @it_sd)\n\n…',
+  'sender_info': 'Пользователь: Sergey Danilenko (ID: 443426947, @it_sd)',
+  'correlation_id': '2763e36e4c11',
+  'tool_call_id': '9CCeilPX5TI6v8WzRr3LjVwXw8H1rruf',
+  'thread_id': 'tg-443426947-865fd4dd'
+}
+[SEND_EMAIL] ✅ Email sent successfully
+```
 
 ## 5. Time travel
 
-### История чек-пойнтов (`aget_state_history`)
+### История чек-пойнтов
 
 ```
-2) история чек-пойнтов (checkpoint_id / next / ключи state):
+2) история чек-пойнтов (checkpoint_id / next):
    1f1b584f-427f-69b2-8002-f510f7399d3e  next=('confirm_and_send',)
    1f1b584f-427f-69b1-8001-2433449dc54d  next=('prepare_email',)
    1f1b584f-427d-629b-8000-8d308c855c1d  next=('call_model',)
    1f1b584f-427a-6b81-bfff-72b0ed7dddba  next=('__start__',)
 ```
 
-Сверху вниз — от свежего к старому. Верхний снапшот соответствует остановке на `interrupt`.
+Читается сверху вниз — от свежего к старому. Верхний снапшот — остановка на `interrupt`.
 
 ### Чтение прошлого чек-пойнта
 
@@ -176,77 +177,74 @@ Read-only: `send_fn` не вызывается, тред `demo` не двига�
 
 ### Replay с противоположным решением
 
-Повторный `resume` того же `interrupt`-чек-пойнта с другим решением не сработает: `Command(resume=...)` сохраняется в чек-пойнтере как pending-write и детерминировано на весь thread-lineage. Первый `resume` выигрывает. Две ветки показаны на двух `thread_id` с одинаковым входом:
+Повторный `resume` того же `interrupt`-чек-пойнта с другим решением **не сработает**: `Command(resume=...)` сохраняется как pending-write и детерминировано на весь thread-lineage. Первый `resume` выигрывает. Две ветки демонстрируются на двух `thread_id`:
 
 ```
 4) две ветки: отказ → sent=False, одобрение → sent=True, отправок=1
 Итог: один и тот же вход дал две ветки — отказ (sent=False) и одобрение (sent=True).
 ```
 
-`resume` — это «доставить пропущенное значение в `interrupt`», а не «переиграть уже принятое решение». Форк — через новый `thread_id` либо `graph.aupdate_state(... checkpoint_id ...)`.
+Форк возможен через новый `thread_id` (как в демо) либо через `graph.aupdate_state(..., checkpoint_id=...)`.
 
 ## 6. Streaming
 
-Выбран `graph.astream(stream_mode=["updates", "messages"])`.
+Выбран `graph.astream(..., stream_mode=["updates"])`.
 
-- `updates` — системный прогресс по узлам («думаю → готовлю черновик → жду подтверждения»).
-- `messages` — токены LLM для typewriter-эффекта.
-- `astream_events(version="v2")` богаче (`on_chat_model_stream`, `on_tool_start`), но существенно объёмнее; для SSE-endpoint избыточен.
+**Обоснование:**
 
-`app/routers/agent.py`:
+- `updates` даёт системный прогресс по узлам — ровно то, что нужно боту, чтобы показать «думаю → готовлю черновик → жду подтверждения».
+- `messages` был **отключён**, потому что модель вызывается через `ainvoke` и не стримится по токенам. При включённом `messages` (только при `ChatOpenAI` под капотом с callback'ами) текст приходил дважды: через `updates(call_model)` и через токены. Дубль виден в чате как два одинаковых сообщения.
+- `astream_events(version="v2")` богаче (`on_chat_model_stream`, `on_tool_start`), но заметно объёмнее. Для SSE-эндпоинта избыточен; оставлен как следующий шаг.
+
+Реализация в `app/routers/agent.py`:
 
 ```python
-@router.post("/agent/stream")
-async def agent_stream(payload: AgentRequest):
-    async def event_gen():
-        async for stream_type, chunk in graph.astream(
-            payload.input,
-            {"configurable": {"thread_id": payload.thread_id,
-                              "user_role": payload.user_role}},
-            stream_mode=["updates", "messages"],
+async def event_source() -> AsyncIterator[str]:
+    logger.info("SSE START thread=%s input_type=%s", req.thread_id, type(graph_input).__name__)
+    try:
+        async for stream_type, payload in graph.astream(
+            graph_input, config, stream_mode=["updates"]
         ):
-            yield f"data: {json.dumps({'type': stream_type, 'data': chunk})}\n\n"
+            if (stream_type == "updates" and isinstance(payload, dict)
+                    and "__interrupt__" in payload):
+                nodes = {k: v for k, v in payload.items() if k != "__interrupt__"}
+                if nodes:
+                    ev = _format_event("updates", nodes)
+                    if ev is not None:
+                        yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                ev = _format_event("updates", {"__interrupt__": payload["__interrupt__"]})
+                if ev is not None:
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                continue
+            event = _format_event(stream_type, payload)
+            if event is not None:
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    except Exception:
+        logger.exception("SSE FAILED thread=%s", req.thread_id)
+    yield 'data: {"type": "done"}\n\n'
+    logger.info("SSE END thread=%s", req.thread_id)
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+return StreamingResponse(
+    event_source(),
+    media_type="text/event-stream",
+    headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+)
 ```
 
-Пауза распознаётся по `__interrupt__` в очередном `updates`-событии; после `Command(resume=True)` поток продолжается на том же `thread_id`.
-
-curl-проверка:
+**curl-проверка (фрагмент вывода):**
 
 ```
-$ curl -N -X POST http://localhost:8000/agent/stream \
-    -H 'Content-Type: application/json' \
-    -d '{"thread_id":"demo-1","input":{"messages":[{"role":"user","content":"отправь вопрос на help desk"}]}}'
+$ docker compose exec app python -c "...httpx.stream POST /agent/stream..."
 
-data: {"type": "updates", "data": {"call_model": {"messages": [{"id": "ai-send", ...}]}}}
-data: {"type": "updates", "data": {"prepare_email": {"draft": {"to": "client@example.com", ...}}}}
-data: {"type": "updates", "data": {"__interrupt__": [{"value": {"type": "approve_email", ...}}]}}
-
-$ curl -N -X POST http://localhost:8000/agent/stream \
-    -d '{"thread_id":"demo-1","resume":true}'
-
-data: {"type": "updates", "data": {"confirm_and_send": {"sent": true}}}
-data: {"type": "messages", "data": {"content": "Готово, письмо обработано."}}
+STATUS 200
+LINE data: {"type": "update", "nodes": ["call_model"], "messages": [{"role": "assistant", "text": "В базе знаний нет ответа на этот вопрос.\nЯ подготовил заявку в HelpDesk — подтвердите отправку.\n\n"}]}
+LINE data: {"type": "interrupt", "payload": {"type": "approve_email", "preview": {"to": "danilenko@ukbmz.ru", ...}}}
+LINE data: {"type": "done"}
 ```
+
+`_format_event` фильтрует `ToolMessage` (`mtype == "tool"`), чтобы служебные ответы инструментов не уходили пользователю. Остальные сообщения разбиваются на `{"type": "update", "messages": [...]}` и `{"type": "assistant_text"}` в боте.
 
 ## 7. Permission policy
 
-`config["configurable"]["user_role"]` принимает `read-only` / `write-with-approve` / `full`. `confirm_and_execute_*` пропускает `interrupt()` для `full`, у `read-only` опасный tool недоступен, `write-with-approve` всегда требует подтверждения.
+`config["configurable"]["user_role"]` принимает `read-only` / `write-with-approve` / `full`: для `full` `confirm_and_execute_*` пропускает `interrupt()`, у `read-only` опасный tool недоступен, `write-with-approve` (используется в сценарии) всегда требует подтверждения.
 
-## 8. Хрупкое и TODO
-
-**Хрупкое:**
-
-- `FakeChat` — заглушка; в проде поведение модели недетерминировано и влияет на попадание в `interrupt`.
-- `Command(resume=...)` пишется в pending-writes на весь lineage; второй `resume` с другим значением молча игнорируется. Стоит отдавать `409 Conflict`, если чек-пойнт уже зарезюмлен.
-- Alembic-`include_name` — точечный фильтр по именам; при переименовании таблиц в LangGraph правится руками.
-- `:memory:` SQLite в тестах не ловит проблемы конкурентного доступа к Postgres.
-
-**TODO:**
-
-- Второй endpoint на `astream_events(version="v2")` с флагом `?verbose=1`.
-- Метрики в SSE (`time_to_first_token`, `interrupt_latency`).
-- Интеграционный тест с Postgres через `testcontainers`.
-- TTL для старых чек-пойнтов.
-```

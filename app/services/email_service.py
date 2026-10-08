@@ -23,8 +23,8 @@ class EmailService:
             self.sender_password = password_attr
         self.recipient_email = settings.exchange_recipient_email
 
-        self.smtp_host = "smtp.yandex.ru"
-        self.smtp_port = 465
+        self.smtp_host = settings.SMTP_HOST
+        self.smtp_port = settings.SMTP_PORT
         self.use_tls = True
 
     async def send_message(

@@ -27,6 +27,38 @@ __pycache__/
 
 data/*_docstore.json
 
-# Python cache (���������� ��� ������������ bot/ � app/)
-__pycache__/
-*.pyc
+# Видео (не место в git)
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Отладочные и временные скрипты
+check_read.py
+check_*.py
+*_debug.py
+
+# Бэкапы
+*.bak
+*.backup
+*_bakup.py
+*.backup.txt
+
+# IDE
+.idea/
+.idea.backup/
+.vscode/
+
+# Docstore (генерируемый артефакт)
+*_docstore.json
+data/*_docstore.json
+data/*_docstore.json.bak
+
+# Корпус (раскомментируйте, если не должен быть в публичном репо)
+data/**/*.docx
+data/**/*.pdf
+
+# Большие файлы
+*.zip
+*.tar.gz
+data/rag-block-03/

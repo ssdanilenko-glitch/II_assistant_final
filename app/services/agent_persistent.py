@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AnyMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -28,11 +28,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from langchain_core.messages import AIMessage
-import unicodedata
+import uuid
+import re
 
 logger = logging.getLogger("it_assistant")
 MAX_ITERATIONS = 6
 DANGEROUS_TOOL = "send_email"
+KEEP_LAST = 8
+SUMMARY_EVERY = 10
 
 # Реальный side-effect отправки: async-callable, инжектируется в фабрику, чтобы
 # в тестах подменяться моком и вызываться ТОЛЬКО после одобрения человеком.
@@ -43,22 +46,32 @@ class PersistentAgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     iteration_count: int
     tool_results: Annotated[list[dict], operator.add]
-    draft: dict | None  # payload письма, подготовленный prepare_email (до отправки)
-    sent: bool  # выполнен ли side-effect отправки
+    draft: dict | None
+    sent: bool
+    summary: str | None
+    summary_upto: int
+
+# Все невидимые/управляющие символы, которые могут прятаться внутри шапки
+_INVISIBLE_RE = re.compile(
+    r"[\ufeff\u200b\u200c\u200d\u200e\u200f"
+    r"\u202a-\u202e\u2066-\u2069\u00a0]"
+)
+
+# Итоговый паттерн: первая буква П/P + «ользователь» + опциональные
+# пробелы + двоеточие. IGNORECASE закрывает все варианты регистра.
+_SENDER_RE = re.compile(r"^[ПPпp]ользователь\s*:", re.IGNORECASE)
+
 
 def _looks_like_sender_line(line: str) -> bool:
-    """Первая строка начинается с П/Pользователь: …"""
-    line = line.lstrip("\ufeff\u200b\u200e\u200f ").strip()
-    if len(line) < 11:
+    """Первая строка: «Пользователь: …» или «Pользователь: …».
+
+    Терпима к невидимым символам (zero-width, bidi, NBSP) между буквами.
+    Двоеточие обязательно — иначе это не шапка, а обычный текст.
+    """
+    if not line:
         return False
-    first = line[0]
-    # латинская P и кириллическая П — обе считаем валидными
-    if first not in ("П", "P", "п", "p"):
-        return False
-    # «ользователь» — все кириллические, но на всякий случай
-    # сравниваем после нормализации NFC
-    tail = unicodedata.normalize("NFC", line[1:11]).lower()
-    return tail == "ользовател"
+    cleaned = _INVISIBLE_RE.sub("", line).strip()
+    return bool(_SENDER_RE.match(cleaned))
 
 def _strip_sender_prefix(body: str) -> str:
     body = body.lstrip("\ufeff\u200b\u200e\u200f ")
@@ -68,6 +81,64 @@ def _strip_sender_prefix(body: str) -> str:
             break
         body = rest.lstrip()
     return body
+
+def _extract_sender_info(messages) -> str:
+    for m in messages:
+        mtype = getattr(m, "type", "")
+        if mtype != "human":
+            continue
+        content = getattr(m, "content", "")
+        if isinstance(content, str):
+            first, _, _ = content.partition("\n")
+            if _looks_like_sender_line(first):
+                return first.strip()
+    return ""
+def _body_contains_sender(body: str) -> bool:
+    if not body:
+        return False
+    head = _INVISIBLE_RE.sub("", body[:200]).lower()
+    return "ользователь:" in head
+
+SUMMARY_PROMPT = (
+    "Сожми следующую переписку в 3–7 предложениях. Сохрани:\n"
+    "- какие вопросы задавал пользователь;\n"
+    "- что уже было отвечено;\n"
+    "- какие действия предпринимались (заявки в HelpDesk, отправки писем).\n"
+    "Не добавляй ничего от себя, только факты из переписки.\n\n"
+)
+async def _make_summary(
+    model: BaseChatModel,
+    messages: list[AnyMessage],
+    previous_summary: str | None = None,
+) -> str:
+    """Дешёвый проход: тот же LLM, но без tool-calling."""
+    chunks: list[str] = []
+    if previous_summary:
+        chunks.append(f"[Ранее: {previous_summary}]")
+    for m in messages:
+        mtype = getattr(m, "type", "")
+        if mtype == "tool":
+            continue  # tool-ответы не нужны в summary, они длинные
+        content = getattr(m, "content", "") or ""
+        if not isinstance(content, str):
+            continue
+        role = {"human": "П", "ai": "А"}.get(mtype, mtype)
+        if content.strip():
+            chunks.append(f"{role}: {content.strip()[:400]}")
+
+    transcript = "\n".join(chunks)
+    # Важно: вызываем на самом model без bind_tools, чтобы не было tool_call
+    response = await model.ainvoke([
+        SystemMessage(content=SUMMARY_PROMPT),
+        HumanMessage(content=transcript or "(пусто)"),
+    ])
+    text = getattr(response, "content", "") or ""
+    if isinstance(text, list):  # multimodal
+        text = " ".join(
+            (b.get("text", "") if isinstance(b, dict) else str(b))
+            for b in text
+        )
+    return text.strip()
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
@@ -96,9 +167,9 @@ def build_agent(
 ):
     """Компилирует персистентный ReAct-граф с HIL-гейтом на `send_email`.
 
-    `tools` — безопасные инструменты (multiply, search_knowledge_base). Опасный
-    `send_email` добавляется здесь и исполняется не в `execute_tool`, а через
-    отдельную ветку с `interrupt`.
+    `tools` — безопасные инструменты (search_knowledge_base,
+    get_helpdesk_status). Опасный `send_email` добавляется здесь и исполняется
+    не в `execute_tool`, а через отдельную ветку с `interrupt`.
 
     `system_prompt` — если передан, добавляется как SystemMessage перед каждым
     вызовом модели.
@@ -108,31 +179,64 @@ def build_agent(
 
     async def call_model(state: PersistentAgentState) -> dict:
         messages = state["messages"]
-        logger.info(f"[call_model] messages length: {len(messages)}")
-
-        # Защита: если messages пусто (например, после ошибочного resume
-        # на несуществующий thread_id) — не зовём Ollama, она упадёт с
-        # "No user query found". Возвращаем короткое сообщение.
         if not messages:
             logger.warning("[call_model] пустой messages — пропускаю вызов LLM")
             return {
                 "messages": [AIMessage(content="Сессия потеряна. Начните заново с /start.")],
                 "iteration_count": state.get("iteration_count", 0) + 1,
             }
+        if state.get("sent") and isinstance(messages[-1], AIMessage):
+            logger.info("[call_model] sent=True, AIMessage уже добавлен — пропускаю LLM")
+            return {
+                "iteration_count": state.get("iteration_count", 0) + 1,
+            }
 
-        # Добавляем SystemMessage только для текущего вызова, но не сохраняем в истории
-        if system_prompt:
-            if not messages or not isinstance(messages[0], SystemMessage):
-                messages_for_llm = [SystemMessage(content=system_prompt)] + messages
-            else:
-                messages_for_llm = messages
+        summary = state.get("summary")
+        summary_upto = state.get("summary_upto", 0)
+
+        if len(messages) <= KEEP_LAST + 1:
+            head: list[AnyMessage] = []
+            tail = messages
         else:
-            messages_for_llm = messages
+            head = [messages[0]]
+            tail = messages[-KEEP_LAST:]
 
-        response = await bound_model.ainvoke(messages_for_llm)
+            need_summary = (
+                    not summary
+                    or (len(messages) - summary_upto) >= SUMMARY_EVERY
+            )
+            if need_summary:
+                to_summarize = messages[1: len(messages) - KEEP_LAST]
+                try:
+                    summary = await _make_summary(
+                        model, to_summarize, previous_summary=summary
+                    )
+                    summary_upto = len(messages) - KEEP_LAST
+                    logger.info(f"[call_model] summary обновлён, покрыто до {summary_upto}")
+                except Exception:
+                    logger.exception("[call_model] не удалось сделать summary")
+
+        parts: list[AnyMessage] = []
+        sys_content = system_prompt or ""
+        if summary:
+            sys_content = f"{sys_content}\n\n[Ранее в диалоге]\n{summary}".strip()
+        if sys_content:
+            parts.append(SystemMessage(content=sys_content))
+
+        head_ids = {getattr(m, "id", None) for m in head}
+        for m in tail:
+            if getattr(m, "id", None) not in head_ids:
+                parts.append(m)
+        logger.info(
+            f"[call_model] state={len(messages)}, to_llm={len(parts)}, "
+            f"summary={'есть' if summary else 'нет'}"
+        )
+        response = await bound_model.ainvoke(parts)
         return {
-            "messages": [response],  # ✅ только новый ответ, история сохранится через add_messages
+            "messages": [response],
             "iteration_count": state.get("iteration_count", 0) + 1,
+            "summary": summary,
+            "summary_upto": summary_upto,
         }
 
     async def execute_tool(state: PersistentAgentState) -> dict:
@@ -155,32 +259,26 @@ def build_agent(
     async def prepare_email(state: PersistentAgentState) -> dict:
         call = _find_call(state["messages"][-1], DANGEROUS_TOOL)
         args = call["args"]
-        body = _strip_sender_prefix(args.get("body") or "")
 
-        # Срезаем ВСЕ ведущие строки «Пользователь: …» — их могло
-        # вставить несколько (промпт + инерция истории).
-        while body.startswith("Пользователь:"):
-            _, _, body = body.partition("\n")
-            body = body.lstrip()
+        raw_body = args.get("body") or ""
+        logger.info("[prepare_email] raw_body=%r", raw_body[:120])
+        body = _strip_sender_prefix(raw_body)
+        logger.info("[prepare_email] after_strip=%r", body[:120])
 
-        # sender_info берём из первого human-сообщения — там он гарантированно есть.
-        sender_info = ""
-        for m in state["messages"]:
-            mtype = getattr(m, "type", "")
-            if mtype != "human":
-                continue
-            content = getattr(m, "content", "")
-            if isinstance(content, str) and content.lstrip().startswith("Пользователь:"):
-                sender_info = content.strip().split("\n", 1)[0]
-                break
+        sender_info = _extract_sender_info(state["messages"])
+        if sender_info and not _body_contains_sender(body):
+            body = f"{sender_info}\n\n{body}"
 
         draft = {
             "to": args.get("to", ""),
             "subject": args.get("subject", ""),
-            "body": f"{sender_info}\n\n{body}" if sender_info else body,
+            "body": body,
+            "sender_info": sender_info,
+            "correlation_id": uuid.uuid4().hex[:12],
             "tool_call_id": call["id"],
         }
         return {"draft": draft}
+
 
     async def confirm_and_send(
             state: PersistentAgentState, config: RunnableConfig
@@ -220,13 +318,19 @@ def build_agent(
             logger.info(f"[confirm_and_send] calling send_email_fn with draft: {draft}")
             await send_email_fn(draft)
             content = f"письмо отправлено: {draft.get('subject', '')}"
+            confirmation = (
+                f"✅ Заявка отправлена в HelpDesk.\n"
+                f"Тема: {draft.get('subject', '')}"
+            )
         else:
             content = "отправка отменена пользователем"
+            confirmation = "❌ Отправка отменена."
 
         return {
             "sent": approved,
             "messages": [
-                ToolMessage(content=content, tool_call_id=draft.get("tool_call_id", ""))
+                ToolMessage(content=content, tool_call_id=draft.get("tool_call_id", "")),
+                AIMessage(content=confirmation),
             ],
             "tool_results": [
                 {"name": DANGEROUS_TOOL, "args": draft, "result": content}
@@ -271,8 +375,8 @@ def build_agent(
     )
     builder.add_edge("execute_tool", "call_model")
     builder.add_edge("prepare_email", "confirm_and_send")
-    #builder.add_edge("confirm_and_send", "call_model")
-    builder.add_edge("confirm_and_send", "force_finish")
+    builder.add_edge("confirm_and_send", "call_model")
+    #builder.add_edge("confirm_and_send", "force_finish")
     builder.add_edge("force_finish", END)
     return builder.compile(checkpointer=checkpointer)
 

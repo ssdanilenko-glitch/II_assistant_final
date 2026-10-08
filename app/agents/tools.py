@@ -39,3 +39,25 @@ def build_search_knowledge_base(
         return f"{answer}\nИсточники: {cited}"
 
     return search_knowledge_base
+
+def build_get_helpdesk_status(
+    get_status_fn: Callable[[str], Awaitable[dict]],
+):
+    """Собирает инструмент get_helpdesk_status поверх переданной функции.
+
+    Логика получения статуса инкапсулирована в get_status_fn — это позволяет
+    использовать в production REST-коннектор к 1С:Itilium, а в тестах —
+    мок без сетевых вызовов.
+    """
+
+    @tool
+    async def get_helpdesk_status(ticket_id: str) -> dict:
+        """Возвращает текущий статус заявки в HelpDesk по её номеру.
+
+        Использовать, когда пользователь спрашивает про статус ранее
+        созданной заявки, например: «какой статус у заявки INC-42?».
+        Действие безопасное — только чтение, состояние не меняется.
+        """
+        return await get_status_fn(ticket_id)
+
+    return get_helpdesk_status

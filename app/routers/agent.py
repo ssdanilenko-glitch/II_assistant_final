@@ -8,16 +8,23 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
+from openai import APIConnectionError, APITimeoutError, AuthenticationError
 from pydantic import BaseModel
+
+from app.core.exceptions import (
+    LLMAuthError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
 from app.deps.providers import AgentGraphDep
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger("it_assistant")
-
 
 def _config(thread_id: str, user_role: str = "write-with-approve") -> dict:
     return {"configurable": {"thread_id": thread_id, "user_role": user_role}}
@@ -68,9 +75,18 @@ def _to_response(result: dict, thread_id: str) -> AgentChatResponse:
 async def agent_chat(req: AgentChatRequest, graph: AgentGraphDep) -> AgentChatResponse:
     if graph is None:
         raise HTTPException(status_code=503, detail="агентный граф не инициализирован")
-    result = await graph.ainvoke(_initial_state(req.message), _config(req.thread_id))
+    try:
+        result = await graph.ainvoke(_initial_state(req.message), _config(req.thread_id))
+    except APIConnectionError as e:
+        logger.error("LLM недоступна (chat): %s", e)
+        raise LLMUnavailableError("Сервис ИИ временно недоступен") from e
+    except APITimeoutError as e:
+        logger.error("LLM timeout (chat): %s", e)
+        raise LLMTimeoutError("LLM не ответила вовремя") from e
+    except AuthenticationError as e:
+        logger.error("LLM auth error (chat): %s", e)
+        raise LLMAuthError("Невалидный ключ LLM") from e
     return _to_response(result, req.thread_id)
-
 
 class AgentResumeRequest(BaseModel):
     thread_id: str
@@ -83,9 +99,18 @@ async def agent_resume(
 ) -> AgentChatResponse:
     if graph is None:
         raise HTTPException(status_code=503, detail="агентный граф не инициализирован")
-    result = await graph.ainvoke(Command(resume=req.decision), _config(req.thread_id))
+    try:
+        result = await graph.ainvoke(Command(resume=req.decision), _config(req.thread_id))
+    except APIConnectionError as e:
+        logger.error("LLM недоступна (resume): %s", e)
+        raise LLMUnavailableError("Сервис ИИ временно недоступен") from e
+    except APITimeoutError as e:
+        logger.error("LLM timeout (resume): %s", e)
+        raise LLMTimeoutError("LLM не ответила вовремя") from e
+    except AuthenticationError as e:
+        logger.error("LLM auth error (resume): %s", e)
+        raise LLMAuthError("Невалидный ключ LLM") from e
     return _to_response(result, req.thread_id)
-
 
 class AgentStreamRequest(BaseModel):
     thread_id: str
@@ -129,9 +154,8 @@ def _format_event(stream_type: str, payload: Any) -> dict | None:
 async def agent_stream(
         req: AgentStreamRequest, graph: AgentGraphDep
 ) -> StreamingResponse:
-   # logger.warning("AGENT STREAM HANDLER v=NEXT thread=%s", req.thread_id)  # ← добавить
     if graph is None:
-        raise HTTPException(status_code=503, detail="агентный граф не инициализирован")
+       raise HTTPException(status_code=503, detail="агентный граф не инициализирован")
 
     if req.resume is not None:
         graph_input: Any = Command(resume=req.resume)
@@ -200,10 +224,25 @@ async def agent_stream(
                     logger.debug("SSE skip type=%s", stream_type)
                 else:
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        except APIConnectionError as e:
+            logger.error("SSE LLM unavailable thread=%s: %s", req.thread_id, e)
+            err = {"type": "error", "code": "llm_unavailable",
+                   "message": "Сервис ИИ временно недоступен"}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+        except APITimeoutError as e:
+            logger.error("SSE LLM timeout thread=%s: %s", req.thread_id, e)
+            err = {"type": "error", "code": "llm_timeout",
+                   "message": "Превышено время ожидания ответа ИИ"}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         except Exception:
             logger.exception("SSE FAILED thread=%s", req.thread_id)
+            err = {"type": "error", "code": "internal_error",
+                   "message": "Внутренняя ошибка агента"}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         yield 'data: {"type": "done"}\n\n'
         logger.info("SSE END thread=%s", req.thread_id)
+
     return StreamingResponse(
         event_source(),
         media_type="text/event-stream",

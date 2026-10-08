@@ -17,6 +17,7 @@ from app.core.exceptions import (
     LLMError,
     LLMRateLimitError,
     LLMTimeoutError,
+    LLMUnavailableError,
 )
 from app.schemas.chat import ChatDelta, ChatRequest, ChatResponse, Usage
 
@@ -55,7 +56,7 @@ class LLMService:
                 raise LLMContentFilterError(str(e)) from e
             raise LLMError(str(e)) from e
         except APIConnectionError as e:
-            raise LLMError(f"connection error: {e}") from e
+            raise LLMUnavailableError(f"connection error: {e}") from e
 
     async def complete(self, req: ChatRequest) -> ChatResponse:
         # Кешируем только детерминированные ответы и при наличии кеша.

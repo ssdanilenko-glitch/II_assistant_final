@@ -1,29 +1,17 @@
-"""Маскирование PII (email / phone / card) в строках.
-
-Учебная заглушка вместо полноценного Presidio. Используется при экспорте
-истории через admin /export, чтобы не утекали персональные данные в выгрузку.
-"""
-
 import re
+import hashlib
 
-# ВАЖНО: порядок имеет значение. Card (16 digits подряд) ловим первым,
-# иначе телефонный regex выгрызет первые ~10 цифр и оставит хвост вида
-# "[PHONE]678". Email тоже впереди — он надёжно отличим от чисел.
-_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"[\w.\-]+@[\w.\-]+\.\w+"), "[EMAIL]"),
-    (re.compile(r"\b\d{16}\b"), "[CARD]"),
-    (
-        re.compile(
-            r"\+?\d{1,3}[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
-        ),
-        "[PHONE]",
-    ),
-]
-
-
-def mask_pii(text: str) -> str:
-    if not text:
-        return text
-    for pat, repl in _PATTERNS:
-        text = pat.sub(repl, text)
+PII_PATTERNS = {
+    "EMAIL": re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
+    "PHONE_RU": re.compile(r"(?<!\w)(?:\+7|8)[\s-]*\(?\d{3}\)?[\s-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)"),
+    "CARD": re.compile(r"\b(?:\d{4}[\s\-]?){3}\d{4}\b"),
+    "INN": re.compile(r"\b(?:\d{10}|\d{12})\b"),
+    "PASSPORT": re.compile(r"\b\d{2}\s?\d{2}\s?\d{6}\b"),
+}
+def redact_pii(text: str) -> str:
+    for name, pattern in PII_PATTERNS.items():
+        text = pattern.sub(f"[{name}]", text)
     return text
+
+def prompt_hash(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()[:16]

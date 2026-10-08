@@ -1,11 +1,11 @@
 graph TD;
-    __start__([<b>START</b>]):::first
-    call_model[<b>call_model</b><br/>Вызов LLM]
-    execute_tool[<b>execute_tool</b><br/>Выполнение безопасных инструментов]
-    prepare_email[<b>prepare_email</b><br/>Подготовка draft письма]
-    confirm_and_send[<b>confirm_and_send</b><br/>Interrupt + отправка после подтверждения]
-    force_finish[<b>force_finish</b><br/>Завершение]
-    __end__([<b>END</b>]):::last
+    __start__([START]):::first
+    call_model[call_model<br/>Вызов LLM]
+    execute_tool[execute_tool<br/>Выполнение безопасных инструментов<br/><i>search_knowledge_base, get_helpdesk_status</i>]
+    prepare_email[prepare_email<br/>Подготовка draft письма<br/><i>tool_call send_email</i>]
+    confirm_and_send[confirm_and_send<br/>Interrupt + отправка после подтверждения]
+    force_finish[force_finish<br/>Завершение]
+    __end__([END]):::last
 
     __start__ --> call_model
     call_model -->|есть send_email| prepare_email
@@ -13,7 +13,7 @@ graph TD;
     call_model -->|нет tool_calls или лимит итераций| force_finish
     execute_tool --> call_model
     prepare_email --> confirm_and_send
-    confirm_and_send --> force_finish
+    confirm_and_send -->|письмо отправлено / отменено| call_model
     force_finish --> __end__
 
     classDef default fill:#f2f0ff,line-height:1.2
