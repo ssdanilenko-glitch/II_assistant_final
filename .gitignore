@@ -62,3 +62,7 @@ data/**/*.pdf
 *.zip
 *.tar.gz
 data/rag-block-03/
+
+*_docstore.json
+data/*_docstore.json
+data/*_docstore.json.bak
