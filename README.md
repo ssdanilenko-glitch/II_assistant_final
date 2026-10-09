@@ -429,5 +429,3 @@ ruff check .
 ## Автор
 
 **Даниленко С.С.** — итоговая аттестация по курсу «ИИ-разработчик: от API до агентов».
-
-- 🔗 Репозиторий: [github.com/ssdanilenko-glitch/itassistant_final](https://github.com/ssdanilenko-glitch/itassistant_final)
