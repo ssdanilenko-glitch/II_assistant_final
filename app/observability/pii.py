@@ -8,7 +8,7 @@ PII_PATTERNS = {
     "INN": re.compile(r"\b(?:\d{10}|\d{12})\b"),
     "PASSPORT": re.compile(r"\b\d{2}\s?\d{2}\s?\d{6}\b"),
 }
-def redact_pii(text: str) -> str:
+def mask_pii(text: str) -> str:
     for name, pattern in PII_PATTERNS.items():
         text = pattern.sub(f"[{name}]", text)
     return text

@@ -16,7 +16,7 @@ services:
       BOT_URL: http://bot:9000
       QDRANT_URL: http://qdrant:6333
       PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
-      HF_HUB_OFFLINE: "1"
+      HF_HUB_OFFLINE: "0"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
