@@ -115,7 +115,6 @@ app/
     ├── rag_baremetal.py                 # Демо «RAG руками» (без LlamaIndex)
     ├── vector_store.py                  # Обёртка над Qdrant (async)
     ├── agent_persistent.py              # Персистентный ReAct-агент с HIL
-    ├── email_sender.py                  # Низкоуровневая отправка через SMTP
     ├── email_service.py                 # EmailService + вложения
     ├── media_processor.py               # Vision / Whisper / PDF / DOCX
     ├── loader_utils.py                  # stable_id, read_jsonl
